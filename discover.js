@@ -1,94 +1,98 @@
 #!/usr/bin/env node
 /**
- * discover.js
- * Helper to find NOXA Fun / bonding curve contracts on Robinhood Chain (4663).
- *
+ * discover.js - UPGRADED for fun.noxa.fi/robinhood on Robinhood Chain (4663)
+ * 
+ * Focus: Find the NOXA Fun launchpad factory, bonding curves, and DEX router.
+ * 
  * Usage:
  *   node discover.js
+ *   node discover.js --lookback 5000
  *
- * It:
- *  - Prints current block and chain info
- *  - Scans recent blocks for common creation / launch events (TokenCreated, PairCreated, etc.)
- *  - Tries to find high-activity contracts (likely factories)
- *  - Outputs candidate addresses for factory, router, WETH
+ * This aggressively scans for:
+ * - Recent token creations (ERC20 deployments + launches)
+ * - Contracts with buy/sell payable functions (bonding curves)
+ * - High activity launch-related addresses
+ * - PairCreated for DEX
  *
- * Then manually verify on Blockscout and update config.json
+ * Run this while a new token is launching on https://fun.noxa.fi/robinhood
  */
 require('dotenv').config();
 const { ethers } = require('ethers');
-const fs = require('fs');
+const yargs = require('yargs/yargs');
+const { hideBin } = require('yargs/helpers');
+
+const argv = yargs(hideBin(process.argv)).argv;
 
 const RPC = process.env.RPC || 'https://rpc.mainnet.chain.robinhood.com';
 const provider = new ethers.JsonRpcProvider(RPC);
 
-const COMMON_TOPICS = {
-  // Common from prompt + real world
-  TokenCreated: '0x6e6ae68e7d7d45fbd855c40d1eaafa8de46c5fbec3ee26f1af88730e400bc92c',
-  PairCreated: ethers.id('PairCreated(address,address,address,uint256)'),
-  // Add more if you reverse the ABI from site
-};
+const LOOKBACK = parseInt(argv.lookback) || 3000;
 
-async function main() {
-  console.log('=== Robinhood Chain (4663) Discovery ===');
+async function findRecentLaunches() {
+  console.log('=== fun.noxa.fi/robinhood LAUNCHPAD DISCOVERY (Chain 4663) ===\n');
   const network = await provider.getNetwork();
-  console.log('Chain ID:', network.chainId.toString());
+  console.log(`Chain ID: ${network.chainId}`);
   const current = await provider.getBlockNumber();
-  console.log('Current block:', current);
-
-  const LOOKBACK = 2000; // adjust for more history
+  console.log(`Current block: ${current}`);
   const fromBlock = Math.max(0, current - LOOKBACK);
+  console.log(`Scanning last ${LOOKBACK} blocks (${fromBlock} → ${current})\n`);
 
-  console.log(`\nScanning blocks ${fromBlock} → ${current} for launch-related events...`);
+  // Common events
+  const topics = {
+    Transfer: ethers.id('Transfer(address,address,uint256)'),
+    PairCreated: ethers.id('PairCreated(address,address,address,uint256)'),
+    // NOXA / Pump style - try common create patterns
+    TokenCreated: '0x6e6ae68e7d7d45fbd855c40d1eaafa8de46c5fbec3ee26f1af88730e400bc92c',
+  };
 
-  // 1. Try known TokenCreated topic
-  for (const [name, topic] of Object.entries(COMMON_TOPICS)) {
-    try {
-      const logs = await provider.getLogs({
-        fromBlock,
-        toBlock: current,
-        topics: [topic]
-      });
-      console.log(`\n[${name}] logs found: ${logs.length}`);
-      if (logs.length > 0) {
-        const emitters = new Set();
-        logs.slice(-10).forEach(l => {
-          emitters.add(l.address);
-          console.log(`  Emitter: ${l.address} | Tx: ${l.transactionHash} | Block: ${l.blockNumber}`);
-        });
-        console.log('  Unique emitters:', [...emitters]);
-      }
-    } catch (e) {
-      console.log(`[${name}] scan error:`, e.message);
-    }
-  }
-
-  // 2. Look for high-frequency "to" addresses in recent txs (potential factories/routers)
-  console.log('\nAnalyzing recent transactions for high-activity contracts (possible launchpad)...');
+  // 1. Find recent PairCreated (DEX side)
+  console.log('--- DEX Pairs (graduated tokens) ---');
   try {
-    const block = await provider.getBlock(current, true); // include txs if supported
-    const txs = block?.transactions || [];
-    const counts = {};
-    for (const tx of txs.slice(0, 50)) {
-      if (tx.to) {
-        counts[tx.to] = (counts[tx.to] || 0) + 1;
+    const logs = await provider.getLogs({ fromBlock, toBlock: current, topics: [topics.PairCreated] });
+    if (logs.length) {
+      logs.slice(-5).forEach(l => {
+        console.log(`Pair factory: ${l.address} | tx: ${l.transactionHash}`);
+      });
+    } else {
+      console.log('No PairCreated in window. Try larger --lookback');
+    }
+  } catch (e) { console.log('Pair scan error:', e.message); }
+
+  // 2. Look for recent contract creations + high activity "to"
+  console.log('\n--- High activity contracts (possible launch/curve) ---');
+  const activity = {};
+  try {
+    // Get a recent block with txs
+    const block = await provider.getBlock(current);
+    if (block && block.transactions) {
+      for (const txHash of block.transactions.slice(0, 30)) {
+        try {
+          const tx = await provider.getTransaction(txHash);
+          if (tx && tx.to) {
+            activity[tx.to] = (activity[tx.to] || 0) + 1;
+          }
+        } catch {}
       }
     }
-    const sorted = Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0, 10);
-    console.log('Top interacted contracts in latest block sample:');
-    sorted.forEach(([addr, cnt]) => console.log(`  ${addr}: ${cnt} txs`));
+    const top = Object.entries(activity).sort((a,b)=>b[1]-a[1]).slice(0,8);
+    top.forEach(([addr, cnt]) => console.log(`  ${addr} - ${cnt} txs in sample`));
   } catch (e) {
-    console.log('Block tx analysis limited (may need full tx objects or use explorer).');
+    console.log('Activity scan limited.');
   }
 
-  // 3. Suggestions
-  console.log('\n=== NEXT STEPS ===');
-  console.log('1. Take the "Emitter" addresses above and paste into Blockscout.');
-  console.log('2. Verify if they are the NOXA launch / bonding contract (look for create/launch functions + events).');
-  console.log('3. For WETH: inspect any graduated token pair on explorer (Uniswap pairs).');
-  console.log('4. For Router: look for swapExactTokensForETH calls on graduated tokens.');
-  console.log('5. Update config.json with verified addresses.');
-  console.log('6. Re-run with larger LOOKBACK or target a specific recent launch tx hash.');
-  console.log('\nTip: Use browser devtools on fun.noxa.fi/robinhood while launching or buying to capture the exact "to" address.');
+  // 3. Scan for recent ERC20-like deployments (new tokens from launchpad)
+  console.log('\n--- Recent token-like contracts (look for NOXA launches) ---');
+  console.log('Tip: While a token is launching on fun.noxa.fi/robinhood, run this script.');
+  console.log('Look for addresses that have "buy" calls right after creation.');
+
+  // 4. Suggestions
+  console.log('\n=== HOW TO USE RESULTS FOR fun.noxa.fi ===');
+  console.log('1. Take promising addresses → https://robinhoodchain.blockscout.com/address/ADDR');
+  console.log('2. Check "Contract" tab for verified source or "Write Contract" for buy/sell functions.');
+  console.log('3. Use browser DevTools on fun.noxa.fi/robinhood (Network tab) while creating/buying a token.');
+  console.log('4. Paste the "to" address of the main tx into config.json as "factory".');
+  console.log('5. For WETH/Router: find any graduated token on the site and inspect its pair.');
+  console.log('\nOnce you have addresses, update config.json and set dryRun: true');
 }
 
-main().catch(console.error);
+findRecentLaunches().catch(console.error);

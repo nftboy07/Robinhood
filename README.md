@@ -1,6 +1,19 @@
 # Robinhood Chain (4663) + fun.noxa.fi Sniper Bot
 
-**Production-grade, configurable meme coin sniping bot for Robinhood Chain (Chain ID 4663) targeting the NOXA Fun launchpad at https://fun.noxa.fi/robinhood.**
+**FULL UPGRADED v1.1 — Production sniper focused on https://fun.noxa.fi/robinhood**
+
+This is the complete upgraded version for the NOXA Fun bonding curve launchpad on Robinhood Chain.
+
+**Key upgrades:**
+- Strong focus on fun.noxa.fi/robinhood
+- Pre-snipe safety + better curve interaction
+- Auto migration detection to DEX
+- Full risk management + PnL
+- Optional Telegram alerts (ready — add your token + chat ID)
+- CLI flags + robust RPC handling
+- PM2 ready for VPS
+
+**⚠️ WARNING** — Only use with money you can afford to lose. Always start in dry-run.
 
 This is a full vertical solution for:
 - Monitoring new token launches on the bonding-curve style launchpad
