@@ -267,10 +267,13 @@ async function initTelegram() {
           const age = Math.floor((Date.now() - l.time)/1000);
           text += `${i+1}. ${l.symbol} (${age}s ago)\n`;
           kbd.inline_keyboard.push([
-            { text: `Buy ${l.symbol}`, callback_data: `buy_${l.addr}_0.0001` }
+            { text: `Buy ${l.symbol}`, callback_data: `showbuy_${l.addr}` }
           ]);
         });
         await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: kbd });
+      } else if (data.startsWith('showbuy_')) {
+        const addr = data.split('_')[1];
+        await sendBuyMenu(addr);
       }
     });
 
@@ -291,10 +294,30 @@ async function sendTg(text, options = {}) {
   }
 }
 
+// Helper to fetch real token name and symbol from the contract
+async function getTokenInfo(addr) {
+  try {
+    const erc20Abi = [
+      "function name() view returns (string)",
+      "function symbol() view returns (string)"
+    ];
+    const token = new ethers.Contract(addr, erc20Abi, provider);
+    const [name, symbol] = await Promise.all([
+      token.name().catch(() => "Unknown Token"),
+      token.symbol().catch(() => "???")
+    ]);
+    return { name, symbol };
+  } catch {
+    return { name: "Unknown Token", symbol: "???" };
+  }
+}
+
 // Send buy menu for a newly detected token with specific amounts
-async function sendBuyMenu(tokenAddr, symbol) {
+async function sendBuyMenu(tokenAddr, fallbackSymbol = "NEW") {
   if (!telegramBot || !TG_CHAT || !ENABLE_TG) return;
-  const text = `🚀 <b>New Launch Detected</b>\n${symbol}\n<code>${tokenAddr}</code>\n\nChoose buy amount (ETH):`;
+  const info = await getTokenInfo(tokenAddr);
+  const displayName = `${info.name} (${info.symbol})`;
+  const text = `🚀 <b>New Launch Detected</b>\n${displayName}\n<code>${tokenAddr}</code>\n\nChoose buy amount (ETH):`;
   const keyboard = {
     inline_keyboard: [
       [
@@ -344,6 +367,7 @@ async function buyToken(curveAddress, amountStr) {
     const log = receipt.logs.find(l => l.topics[0] === transferTopic);
     const amount = log ? BigInt(log.data) : 0n;
     const entryPrice = await getCurrentPrice(curveAddress);
+    const info = await getTokenInfo(curveAddress);
 
     // Check if already have position
     const existing = positions.find(p => p.token === curveAddress);
@@ -352,7 +376,7 @@ async function buyToken(curveAddress, amountStr) {
     } else {
       positions.push({
         token: curveAddress,
-        symbol: 'MANUAL',
+        symbol: `${info.name} (${info.symbol})`,
         amount,
         entryPrice,
         highestPrice: entryPrice,
@@ -604,10 +628,11 @@ async function snipe(curveAddress, symbol) {
     const log = receipt.logs.find(l => l.topics[0] === transferTopic);
     const amount = log ? BigInt(log.data) : estimated || 0n;
     const entryPrice = await getCurrentPrice(curveAddress);
+    const info = await getTokenInfo(curveAddress);
 
     positions.push({ 
       token: curveAddress, 
-      symbol, 
+      symbol: `${info.name} (${info.symbol})`, 
       amount, 
       entryPrice, 
       highestPrice: entryPrice, 
@@ -825,16 +850,18 @@ async function pollNewLaunches() {
     for (const log of logs) {
       try {
         const token = '0x' + log.topics[1].slice(-40);
-        const symbol = 'NEW';
         logger.info(`[NEW LAUNCH] ${token} on fun.noxa.fi/robinhood`);
         await sendTg(`🚀 New launch detected: <code>${token}</code>`);
-        // Send buy buttons with specific amounts
-        await sendBuyMenu(token, symbol);
+        // Send buy buttons with real token name
+        await sendBuyMenu(token);
+        // Get info for recent list
+        const info = await getTokenInfo(token);
+        const display = `${info.name} (${info.symbol})`;
         // Track for recent
-        recentLaunches.unshift({addr: token, symbol, time: Date.now()});
+        recentLaunches.unshift({addr: token, symbol: display, time: Date.now()});
         if (recentLaunches.length > 5) recentLaunches.pop();
         // Keep small auto snipe if desired
-        setTimeout(() => snipe(token, symbol), 1800);
+        setTimeout(() => snipe(token, info.symbol), 1800);
       } catch {
         const token = '0x' + log.topics[1].slice(-40);
         await sendBuyMenu(token, 'LAUNCH');
