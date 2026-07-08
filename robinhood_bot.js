@@ -549,7 +549,7 @@ async function main() {
     process.exit(0);
   });
 
-  logger.info('Bot running. Press Ctrl+C to stop. Add your TG + PK when ready.');
+  logger.info('Bot running. Press Ctrl+C to stop.');
 }
 
 main().catch(e => { logger.error(e); process.exit(1); });
