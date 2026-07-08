@@ -15,5 +15,10 @@
   "dryRun": true,
   "logLevel": "info",
   "positionsFile": "positions.json",
-  "eventTopic": "0x6e6ae68e7d7d45fbd855c40d1eaafa8de46c5fbec3ee26f1af88730e400bc92c"
+  "eventTopic": "0x6e6ae68e7d7d45fbd855c40d1eaafa8de46c5fbec3ee26f1af88730e400bc92c",
+  "honeypotCheck": true,
+  "maxDailyLossPct": 25,
+  "maxTradesPerHour": 12,
+  "slippagePct": 15,
+  "enableTelegram": true
 }

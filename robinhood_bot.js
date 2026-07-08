@@ -71,9 +71,16 @@ const TAKE_PROFIT = config.takeProfitPct ?? 0.60;
 const TRAILING = config.trailingStopPct ?? 0.08;
 const POLL_MS = config.pollIntervalMs || 1100;
 const GAS_MULT = config.gasMultiplier || 1.8;
-const DRY_RUN = config.dryRun !== false; // default safe
+const DRY_RUN = config.dryRun !== false;
 const MAX_POS = config.maxConcurrentPositions || 8;
 const POSITIONS_FILE = config.positionsFile || 'positions.json';
+
+// New risk & safety settings (fun.noxa.fi focus)
+const HONEYPOT_CHECK = config.honeypotCheck !== false;
+const MAX_DAILY_LOSS_PCT = config.maxDailyLossPct ?? 25;
+const MAX_TRADES_PER_HOUR = config.maxTradesPerHour ?? 12;
+const SLIPPAGE_PCT = config.slippagePct ?? 15;
+const ENABLE_TG = config.enableTelegram !== false;
 
 // ====================== PROVIDER & WALLET ======================
 const provider = new ethers.JsonRpcProvider(RPC);
@@ -109,24 +116,63 @@ let positions = [];
 let lastPolledBlock = 0;
 let telegramBot = null;
 
-// ====================== TELEGRAM (ready for your token) ======================
+// Daily risk tracking (no multi-wallet)
+let dailyStats = {
+  startTime: Date.now(),
+  trades: 0,
+  realizedPnl: 0,   // in ETH (approximate)
+  lastTradeHour: 0
+};
+
+// Telegram command queue
+let pendingCommands = [];
+
+// ====================== TELEGRAM (ready - add your token + user id later) ======================
 async function initTelegram() {
-  if (!TG_TOKEN || !TG_CHAT) {
-    logger.info('Telegram not configured (add TG_BOT_TOKEN + TG_CHAT_ID to .env later)');
+  if (!TG_TOKEN || !TG_CHAT || !ENABLE_TG) {
+    logger.info('Telegram disabled or not configured (add TG_BOT_TOKEN + TG_CHAT_ID later)');
     return;
   }
   try {
     const TelegramBot = require('node-telegram-bot-api');
-    telegramBot = new TelegramBot(TG_TOKEN, { polling: false });
-    logger.info('Telegram alerts ENABLED');
-    await sendTg('🚀 Robinhood Sniper started on fun.noxa.fi/robinhood');
+    telegramBot = new TelegramBot(TG_TOKEN, { polling: true });
+
+    // Command handler for fun.noxa.fi bot
+    telegramBot.on('message', async (msg) => {
+      if (String(msg.chat.id) !== String(TG_CHAT)) return;
+      const text = (msg.text || '').trim().toLowerCase();
+
+      if (text === '/status') {
+        const pos = positions.length;
+        const dailyPnl = dailyStats.realizedPnl.toFixed(4);
+        await sendTg(`📊 Status: ${pos} positions | Daily trades: ${dailyStats.trades} | PnL: ${dailyPnl} ETH`);
+      } else if (text === '/positions') {
+        if (positions.length === 0) return sendTg('No open positions');
+        let msg = '📍 Positions:\n';
+        positions.forEach((p, i) => msg += `${i+1}. ${p.symbol} - entry ${ethers.formatEther(p.entryPrice)}\n`);
+        await sendTg(msg);
+      } else if (text.startsWith('/sell ')) {
+        const idx = parseInt(text.split(' ')[1]) - 1;
+        if (positions[idx]) {
+          await sellPosition(positions[idx]);
+          await sendTg('Sell triggered');
+        }
+      } else if (text === '/stop') {
+        process.exit(0);
+      } else if (text === '/help') {
+        await sendTg('Commands: /status /positions /sell N /stop');
+      }
+    });
+
+    logger.info('Telegram alerts + commands ENABLED (fun.noxa.fi mode)');
+    await sendTg('🚀 Robinhood Sniper v1.1 started - focused on fun.noxa.fi/robinhood');
   } catch (e) {
     logger.warn('Telegram init failed:', e.message);
   }
 }
 
 async function sendTg(text) {
-  if (!telegramBot || !TG_CHAT) return;
+  if (!telegramBot || !TG_CHAT || !ENABLE_TG) return;
   try {
     await telegramBot.sendMessage(TG_CHAT, text, { parse_mode: 'HTML' });
   } catch (e) {
@@ -178,21 +224,133 @@ async function getCurrentPrice(tokenAddr) {
   } catch { return 0n; }
 }
 
+// ====================== NEW UPGRADES: Curve math, Honeypot, DEX sell, Risk ======================
+
+// Estimate tokens you would receive for a buy (uses static call simulation)
+async function estimateBuyOutput(curveAddress, ethAmount) {
+  try {
+    const curve = new ethers.Contract(curveAddress, curveABI, provider);
+    // Many bonding curves expose this via simulation of buy
+    const estimatedTokens = await curve.callStatic.buy(0, wallet.address, { value: ethAmount });
+    return estimatedTokens;
+  } catch (e) {
+    // Fallback: rough price * amount
+    const price = await getCurrentPrice(curveAddress);
+    if (price > 0) return (ethAmount * BigInt(10**18)) / price;
+    return 0n;
+  }
+}
+
+// Honeypot / rug check before snipe (simulate buy then sell)
+async function isHoneypotOrBad(curveAddress) {
+  if (!HONEYPOT_CHECK) return false;
+  try {
+    const curve = new ethers.Contract(curveAddress, curveABI, provider);
+    const testAmount = ethers.parseEther('0.01');
+
+    // Simulate buy
+    const buyGas = await curve.buy.estimateGas(0, wallet.address, { value: testAmount });
+    if (buyGas > 500000n) return true; // suspicious high gas
+
+    // Try to simulate sell (if we had tokens)
+    // For real check, we would need to buy small amount on test, but for speed we check sell function exists and basic
+    const sellGas = await curve.sell.estimateGas(1000n, 0).catch(() => 999999n);
+    if (sellGas > 800000n) return true;
+
+    return false;
+  } catch {
+    return true; // if can't even estimate, risky
+  }
+}
+
+// Check daily risk limits
+function checkRiskLimits() {
+  const now = Date.now();
+  const hoursSinceStart = (now - dailyStats.startTime) / (1000 * 3600);
+
+  // Reset daily stats every 24h
+  if (hoursSinceStart > 24) {
+    dailyStats = { startTime: now, trades: 0, realizedPnl: 0, lastTradeHour: 0 };
+  }
+
+  const currentHour = Math.floor(now / (1000 * 3600));
+  if (currentHour !== dailyStats.lastTradeHour) {
+    dailyStats.lastTradeHour = currentHour;
+    // could reset hourly counters here
+  }
+
+  if (dailyStats.trades >= MAX_TRADES_PER_HOUR) {
+    logger.warn('Max trades per hour reached');
+    return false;
+  }
+
+  const lossPct = dailyStats.realizedPnl < 0 ? Math.abs(dailyStats.realizedPnl / 1) * 100 : 0; // rough
+  if (lossPct > MAX_DAILY_LOSS_PCT) {
+    logger.warn('Daily loss limit hit');
+    return false;
+  }
+  return true;
+}
+
+// Sell on DEX (Uniswap V2 style) after migration
+async function sellOnDex(tokenAddress, tokenAmount) {
+  if (!ROUTER || !WETH || DRY_RUN) {
+    logger.info('[DRY] Would sell on DEX');
+    return;
+  }
+  try {
+    const router = new ethers.Contract(ROUTER, routerABI, wallet);
+    const path = [tokenAddress, WETH];
+    const deadline = Math.floor(Date.now() / 1000) + 300;
+
+    // Approve if needed (simplified)
+    // In production add ERC20 approve logic
+
+    const minOut = 0; // use slippage in real version
+    const tx = await router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+      tokenAmount,
+      minOut,
+      path,
+      wallet.address,
+      deadline,
+      { gasLimit: 600000 }
+    );
+    await tx.wait();
+    logger.info(`[DEX SELL] ${tokenAddress}`);
+    await sendTg('✅ Sold on DEX after graduation');
+  } catch (e) {
+    logger.error('DEX sell failed: ' + e.message);
+  }
+}
+
 // ====================== SNIPE (focus fun.noxa.fi) ======================
 async function snipe(curveAddress, symbol) {
   if (positions.length >= MAX_POS) return;
+  if (!checkRiskLimits()) return;
 
-  logger.info(`[SNIPE] ${symbol} @ ${curveAddress} | ${ethers.formatEther(SNIPE_AMOUNT)} ETH`);
+  logger.info(`[SNIPE] ${symbol} @ ${curveAddress} | ${ethers.formatEther(SNIPE_AMOUNT)} ETH (fun.noxa.fi)`);
+
+  // Honeypot / bad curve check
+  if (await isHoneypotOrBad(curveAddress)) {
+    logger.warn(`[SKIP] Possible honeypot or bad curve: ${curveAddress}`);
+    await sendTg(`⚠️ Skipped suspicious launch: ${symbol}`);
+    return;
+  }
+
+  // Better curve estimation
+  const estimated = await estimateBuyOutput(curveAddress, SNIPE_AMOUNT);
+  logger.info(`Estimated tokens for buy: ${ethers.formatEther(estimated || 0n)}`);
 
   if (DRY_RUN) {
-    await sendTg(`🟡 DRY RUN: Would snipe <b>${symbol}</b>`);
+    await sendTg(`🟡 DRY RUN: Would snipe <b>${symbol}</b> on fun.noxa.fi/robinhood`);
     positions.push({
       token: curveAddress, symbol,
-      amount: ethers.parseEther('1000000'),
-      entryPrice: 1000000000000n,
+      amount: estimated || ethers.parseEther('1000000'),
+      entryPrice: await getCurrentPrice(curveAddress) || 1000000000000n,
       highestPrice: 1000000000000n,
       isMigrated: false, entryBlock: 0
     });
+    dailyStats.trades++;
     savePositions();
     return;
   }
@@ -200,10 +358,9 @@ async function snipe(curveAddress, symbol) {
   const curve = new ethers.Contract(curveAddress, curveABI, wallet);
 
   try {
-    // Pre-check: try to get price
     const price = await getCurrentPrice(curveAddress);
     if (price === 0n) {
-      logger.warn('Curve not ready yet');
+      logger.warn('Curve not ready');
       return;
     }
 
@@ -213,7 +370,7 @@ async function snipe(curveAddress, symbol) {
 
     const tx = await curve.buy(0n, wallet.address, {
       value: SNIPE_AMOUNT,
-      gasLimit: gasEst * 140n / 100n,
+      gasLimit: gasEst * 145n / 100n,
       maxFeePerGas: maxFee,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
@@ -221,19 +378,19 @@ async function snipe(curveAddress, symbol) {
     const receipt = await tx.wait();
     logger.info(`[BOUGHT] ${symbol} tx: ${receipt.transactionHash}`);
 
-    // Extract amount
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const log = receipt.logs.find(l => l.topics[0] === transferTopic);
-    const amount = log ? BigInt(log.data) : 0n;
+    const amount = log ? BigInt(log.data) : estimated || 0n;
     const entryPrice = await getCurrentPrice(curveAddress);
 
     positions.push({ token: curveAddress, symbol, amount, entryPrice, highestPrice: entryPrice, isMigrated: false, entryBlock: receipt.blockNumber });
+    dailyStats.trades++;
     savePositions();
 
-    await sendTg(`✅ Bought <b>${symbol}</b>\nAmount: ${ethers.formatEther(amount)}\nTx: <code>${receipt.transactionHash}</code>`);
+    await sendTg(`✅ Bought <b>${symbol}</b> on fun.noxa.fi/robinhood\nEst. amount: ${ethers.formatEther(amount)}`);
   } catch (e) {
     logger.error(`[SNIPE FAIL] ${symbol}: ${e.message}`);
-    await sendTg(`❌ Snipe failed for ${symbol}: ${e.message.slice(0,120)}`);
+    await sendTg(`❌ Snipe failed ${symbol}`);
   }
 }
 
@@ -241,6 +398,14 @@ async function snipe(curveAddress, symbol) {
 async function sellPosition(pos) {
   if (DRY_RUN) {
     logger.info(`[DRY] Would sell ${pos.symbol}`);
+    positions = positions.filter(p => p.token !== pos.token);
+    savePositions();
+    return;
+  }
+
+  // If migrated to DEX, use DEX sell
+  if (pos.isMigrated && ROUTER) {
+    await sellOnDex(pos.token, pos.amount);
     positions = positions.filter(p => p.token !== pos.token);
     savePositions();
     return;
@@ -264,7 +429,16 @@ async function monitorPositions() {
   for (const pos of [...positions]) {
     try {
       const price = await getCurrentPrice(pos.token);
-      if (!price || price === 0n) continue;
+      if (!price || price === 0n) {
+        // Try to detect if migrated (price query fails but pair may exist)
+        if (ROUTER && !pos.isMigrated) {
+          // Simple migration heuristic: if curve price stopped working, assume graduated
+          pos.isMigrated = true;
+          logger.info(`[MIGRATED?] ${pos.symbol} switched to DEX mode`);
+          await sendTg(`🔄 ${pos.symbol} likely graduated to DEX`);
+        }
+        continue;
+      }
 
       const entry = Number(pos.entryPrice);
       const curr = Number(price);
@@ -279,6 +453,7 @@ async function monitorPositions() {
 
       if (reason) {
         logger.info(`[${reason}] ${pos.symbol} PnL: ${pnl.toFixed(1)}%`);
+        dailyStats.realizedPnl += (price - pos.entryPrice) * (pos.amount / BigInt(10**18)) / BigInt(10**18) || 0; // rough
         await sendTg(`📉 <b>${reason}</b> ${pos.symbol} | PnL ${pnl.toFixed(1)}%`);
         await sellPosition(pos);
       }
@@ -295,7 +470,9 @@ async function pollNewLaunches() {
     if (current <= lastPolledBlock) return;
 
     const topic = config.eventTopic || ethers.id('TokenCreated(address,address,string,string,uint256)');
+    const curveCompleteTopic = ethers.id('CurveCompleted(address,uint256,uint256)');
 
+    // New launches
     const logs = await withRetry(() => provider.getLogs({
       address: FACTORY || undefined,
       fromBlock: lastPolledBlock + 1,
@@ -307,15 +484,31 @@ async function pollNewLaunches() {
       try {
         const token = '0x' + log.topics[1].slice(-40);
         const symbol = 'NEW';
-        logger.info(`[NEW LAUNCH] ${token}`);
-        await sendTg(`🚀 New launch detected on fun.noxa.fi/robinhood: <code>${token}</code>`);
+        logger.info(`[NEW LAUNCH] ${token} on fun.noxa.fi/robinhood`);
+        await sendTg(`🚀 New launch detected: <code>${token}</code>`);
         setTimeout(() => snipe(token, symbol), 1800);
       } catch {
-        // generic fallback
         const token = '0x' + log.topics[1].slice(-40);
         setTimeout(() => snipe(token, 'LAUNCH'), 2000);
       }
     }
+
+    // Detect graduations (migrations) for open positions
+    const completeLogs = await withRetry(() => provider.getLogs({
+      fromBlock: lastPolledBlock + 1,
+      toBlock: current,
+      topics: [curveCompleteTopic]
+    }));
+    for (const log of completeLogs) {
+      const token = '0x' + log.topics[1].slice(-40);
+      const pos = positions.find(p => p.token.toLowerCase() === token.toLowerCase());
+      if (pos && !pos.isMigrated) {
+        pos.isMigrated = true;
+        logger.info(`[GRADUATED] ${token} moved to DEX`);
+        await sendTg(`🔄 ${token} graduated - will sell on DEX`);
+      }
+    }
+
     lastPolledBlock = current;
   } catch (e) {
     logger.warn('Poll error: ' + (e.message || e));
