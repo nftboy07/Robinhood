@@ -1,0 +1,20 @@
+{
+  "name": "robinhood-bot",
+  "version": "1.0.0",
+  "description": "Robinhood Chain (4663) + fun.noxa.fi production-grade bonding curve sniper",
+  "main": "robinhood_bot.js",
+  "scripts": {
+    "start": "node robinhood_bot.js",
+    "discover": "node discover.js",
+    "test": "echo \"No tests - use small amounts and dryRun mode\""
+  },
+  "keywords": ["robinhood", "chain", "4663", "noxa", "sniper", "evm"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "ethers": "^6.17.0",
+    "winston": "^3.19.0"
+  }
+}

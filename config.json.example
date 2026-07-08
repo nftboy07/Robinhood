@@ -1,0 +1,19 @@
+{
+  "rpc": "https://rpc.mainnet.chain.robinhood.com",
+  "ws": "wss://rpc.mainnet.chain.robinhood.com/ws",
+  "chainId": 4663,
+  "factory": "0xREPLACE_WITH_ACTUAL_NOXA_FACTORY_FROM_DISCOVERY",
+  "weth": "0xREPLACE_WITH_ACTUAL_WETH",
+  "router": "0xREPLACE_WITH_ACTUAL_UNISWAP_V2_ROUTER",
+  "snipeAmountEth": "0.05",
+  "maxConcurrentPositions": 8,
+  "stopLossPct": 0.15,
+  "takeProfitPct": 0.6,
+  "trailingStopPct": 0.08,
+  "pollIntervalMs": 1200,
+  "gasMultiplier": 1.8,
+  "dryRun": true,
+  "logLevel": "info",
+  "positionsFile": "positions.json",
+  "eventTopic": "0x6e6ae68e7d7d45fbd855c40d1eaafa8de46c5fbec3ee26f1af88730e400bc92c"
+}
