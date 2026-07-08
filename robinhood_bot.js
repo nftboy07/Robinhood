@@ -316,8 +316,12 @@ async function getTokenInfo(addr) {
 async function sendBuyMenu(tokenAddr, fallbackSymbol = "NEW") {
   if (!telegramBot || !TG_CHAT || !ENABLE_TG) return;
   const info = await getTokenInfo(tokenAddr);
-  const displayName = `${info.name} (${info.symbol})`;
-  const text = `🚀 <b>New Launch Detected</b>\n${displayName}\n<code>${tokenAddr}</code>\n\nChoose buy amount (ETH):`;
+  let displayName = `${info.name} (${info.symbol})`;
+  if (info.name === "Unknown Token" || info.symbol === "???") {
+    displayName = `Unnamed Meme Token`;
+  }
+  const shortAddr = tokenAddr.slice(0, 6) + "..." + tokenAddr.slice(-4);
+  const text = `🚀 <b>New Launch Detected</b>\n${displayName}\n<code>${tokenAddr}</code> (${shortAddr})\n\nChoose buy amount (ETH):`;
   const keyboard = {
     inline_keyboard: [
       [
@@ -856,7 +860,11 @@ async function pollNewLaunches() {
         await sendBuyMenu(token);
         // Get info for recent list
         const info = await getTokenInfo(token);
-        const display = `${info.name} (${info.symbol})`;
+        let display = `${info.name} (${info.symbol})`;
+        if (info.name === "Unknown Token") {
+          const short = token.slice(0,6) + "..." + token.slice(-4);
+          display = `Unnamed (${short})`;
+        }
         // Track for recent
         recentLaunches.unshift({addr: token, symbol: display, time: Date.now()});
         if (recentLaunches.length > 5) recentLaunches.pop();
