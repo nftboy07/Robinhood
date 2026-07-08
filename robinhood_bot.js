@@ -141,6 +141,9 @@ let dailyStats = {
 // Telegram command queue
 let pendingCommands = [];
 
+// Recent launches for manual buy (stores last few detected)
+let recentLaunches = []; // [{addr, symbol, time}]
+
 // ====================== TELEGRAM WITH BUTTONS (fun.noxa.fi/robinhood) ======================
 async function initTelegram() {
   if (!TG_TOKEN || !TG_CHAT || !ENABLE_TG) {
@@ -167,6 +170,9 @@ async function initTelegram() {
             [
               { text: '⚙️ Config', callback_data: 'config' },
               { text: '🛑 Stop Bot', callback_data: 'stop' }
+            ],
+            [
+              { text: '📋 Recent Launches', callback_data: 'recent' }
             ],
             [
               { text: '🔁 Refresh Menu', callback_data: 'menu' }
@@ -250,6 +256,21 @@ async function initTelegram() {
         const addr = parts[1];
         const amt = parts[2];
         await buyToken(addr, amt);
+      } else if (data === 'recent') {
+        if (recentLaunches.length === 0) {
+          await telegramBot.sendMessage(chatId, 'No recent launches yet.');
+          return;
+        }
+        let text = '📋 <b>Recent Launches</b>\n';
+        const kbd = { inline_keyboard: [] };
+        recentLaunches.forEach((l, i) => {
+          const age = Math.floor((Date.now() - l.time)/1000);
+          text += `${i+1}. ${l.symbol} (${age}s ago)\n`;
+          kbd.inline_keyboard.push([
+            { text: `Buy ${l.symbol}`, callback_data: `buy_${l.addr}_0.0001` }
+          ]);
+        });
+        await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: kbd });
       }
     });
 
@@ -809,11 +830,16 @@ async function pollNewLaunches() {
         await sendTg(`🚀 New launch detected: <code>${token}</code>`);
         // Send buy buttons with specific amounts
         await sendBuyMenu(token, symbol);
+        // Track for recent
+        recentLaunches.unshift({addr: token, symbol, time: Date.now()});
+        if (recentLaunches.length > 5) recentLaunches.pop();
         // Keep small auto snipe if desired
         setTimeout(() => snipe(token, symbol), 1800);
       } catch {
         const token = '0x' + log.topics[1].slice(-40);
         await sendBuyMenu(token, 'LAUNCH');
+        recentLaunches.unshift({addr: token, symbol: 'LAUNCH', time: Date.now()});
+        if (recentLaunches.length > 5) recentLaunches.pop();
         setTimeout(() => snipe(token, 'LAUNCH'), 2000);
       }
     }
