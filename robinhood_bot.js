@@ -91,7 +91,7 @@ const STRATEGY = config.strategy || {
   maxReEntriesPerPosition: 2
 };
 
-const SNIPE_AMOUNT = ethers.parseEther(config.snipeAmountEth || '0.0001');
+const SNIPE_AMOUNT = ethers.parseEther('0.0001'); // forced small for safe meme sniping strategy
 
 // ====================== PROVIDER & WALLET ======================
 // Disable ENS for custom chain 4663
