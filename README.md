@@ -1,17 +1,23 @@
 # Robinhood Chain (4663) + fun.noxa.fi Sniper Bot
 
-**FULL UPGRADED v1.1 — Production sniper focused on https://fun.noxa.fi/robinhood**
+**FULL UPGRADED — Production sniper focused on https://fun.noxa.fi/robinhood**
 
-This is the complete upgraded version for the NOXA Fun bonding curve launchpad on Robinhood Chain.
+**Important for you:**
+- I handle **ALL** GitHub work (commits, pushes) and **ALL** VPS work (pull, install, config, PM2, restarts).
+- You **only** give me sensitive information (Private Key, Telegram Bot Token, Chat ID, and real contract addresses) through `.env` files.
+- Never paste secrets in chat except when instructing me to put them in .env.
+
+This is the complete upgraded version for the NOXA Fun bonding curve launchpad on Robinhood Chain (4663).
 
 **Key upgrades:**
 - Strong focus on fun.noxa.fi/robinhood
 - Pre-snipe safety + better curve interaction
 - Auto migration detection to DEX
 - Full risk management + PnL
-- Optional Telegram alerts (ready — add your token + chat ID)
+- Optional Telegram alerts + commands (ready — add your token + chat ID)
 - CLI flags + robust RPC handling
 - PM2 ready for VPS
+- Honeypot checks, daily loss limits, max trades per hour
 
 **⚠️ WARNING** — Only use with money you can afford to lose. Always start in dry-run.
 
