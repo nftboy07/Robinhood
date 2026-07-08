@@ -22,7 +22,7 @@
   "slippagePct": 10,
   "enableTelegram": true,
   "strategy": {
-    "description": "Safe Meme Snipe: Tiny entries on new launches, ladder TP + trailing for profits, quick SL for capital protection, limited re-entries on dips, auto DEX exit on graduation.",
+    "description": "Safe Meme Snipe: Tiny entries on new launches, ladder TP + trailing for profits, quick SL for capital protection, limited re-entries on dips, auto DEX exit on graduation. Moonbag: leave portion unsold for potential moonshot.",
     "tpLadder": [0.5, 1.0, 2.0],
     "tpSellPercents": [30, 30, 40],
     "reEntryOnDip": true,
@@ -30,6 +30,7 @@
     "reEntryAmountEth": "0.00005",
     "maxReEntriesPerPosition": 2,
     "minCurveProgressForSnipe": 5,
-    "maxCurveProgressForSnipe": 80
+    "maxCurveProgressForSnipe": 80,
+    "moonbagPct": 25
   }
 }

@@ -88,7 +88,8 @@ const STRATEGY = config.strategy || {
   reEntryOnDip: true,
   reEntryDipPct: 0.30,
   reEntryAmountEth: "0.00005",
-  maxReEntriesPerPosition: 2
+  maxReEntriesPerPosition: 2,
+  moonbagPct: 25
 };
 
 const SNIPE_AMOUNT = ethers.parseEther('0.0001'); // forced small for safe meme sniping strategy
@@ -580,10 +581,10 @@ async function monitorPositions() {
   }
 }
 
-// === CORE STRATEGY: Small amount snipe + Capital safe profit taking ===
+// === CORE STRATEGY: Small amount snipe + Capital safe profit taking + Moonbag ===
 async function manageSafeStrategy(pos, currentPrice, pnlPct) {
   const entryPrice = Number(pos.entryPrice);
-  const remainingAmount = pos.amount - (pos.soldAmount || 0n);
+  let remainingAmount = pos.amount - (pos.soldAmount || 0n);
   if (remainingAmount <= 0n) {
     positions = positions.filter(p => p.token !== pos.token);
     savePositions();
@@ -593,16 +594,27 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
   const peak = Number(pos.highestPrice);
   const trailingPrice = peak * (1 - TRAILING);
 
-  // 1. Hard Stop Loss - protect capital fast
+  // Calculate moonbag: never sell below this % of original position
+  const moonbagPct = STRATEGY.moonbagPct || 25;
+  const moonbagAmount = (pos.amount * BigInt(moonbagPct)) / 100n;
+  const sellableAmount = remainingAmount > moonbagAmount ? remainingAmount - moonbagAmount : 0n;
+
+  if (sellableAmount <= 0n) {
+    // Only moonbag left - hold for potential moon
+    logger.info(`[MOONBAG] ${pos.symbol} - Only ${moonbagPct}% moonbag remaining. Holding for moonshot.`);
+    return;
+  }
+
+  // 1. Hard Stop Loss - protect capital fast (sell everything, even moonbag on hard rugs)
   if (pnlPct <= -STOP_LOSS * 100) {
-    logger.info(`[SL] ${pos.symbol} PnL ${pnlPct.toFixed(1)}% - Selling remaining for capital protection`);
+    logger.info(`[SL] ${pos.symbol} PnL ${pnlPct.toFixed(1)}% - Selling for capital protection`);
     await sendTg(`🛡️ SL hit on ${pos.symbol} (${pnlPct.toFixed(1)}%) - Protecting capital`);
     await sellPosition(pos);
     dailyStats.realizedPnl += (currentPrice - pos.entryPrice) * (remainingAmount / BigInt(10**18)) / BigInt(10**18) || 0;
     return;
   }
 
-  // 2. TP Ladder (partial sells for safe profits)
+  // 2. TP Ladder (partial sells for safe profits) - respect moonbag
   const tpLadder = STRATEGY.tpLadder || [0.5, 1.0, 2.0];
   const sellPercents = STRATEGY.tpSellPercents || [30, 30, 40];
   const currentMultiplier = currentPrice / entryPrice;
@@ -611,13 +623,15 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
     const target = tpLadder[i];
     if (currentMultiplier >= target && !(pos.tpReached || []).includes(i)) {
       const sellPct = sellPercents[i] || 30;
-      const sellAmount = (remainingAmount * BigInt(Math.floor(sellPct))) / 100n;
+      let sellAmount = (remainingAmount * BigInt(Math.floor(sellPct))) / 100n;
+
+      // Cap sell so we don't go below moonbag
+      if (sellAmount > sellableAmount) sellAmount = sellableAmount;
 
       if (sellAmount > 0n) {
-        logger.info(`[TP${i+1}] ${pos.symbol} reached ${target}x - Selling ${sellPct}%`);
-        await sendTg(`💰 TP${i+1} hit on ${pos.symbol} (${(target*100).toFixed(0)}% gain) - Selling ${sellPct}%`);
+        logger.info(`[TP${i+1}] ${pos.symbol} reached ${target}x - Selling ${sellPct}% (leaving moonbag)`);
+        await sendTg(`💰 TP${i+1} hit on ${pos.symbol} (${(target*100).toFixed(0)}% gain) - Selling ${sellPct}% , moonbag kept`);
         
-        // Partial sell logic
         const tempPos = {...pos, amount: sellAmount};
         await sellPosition(tempPos);
         
@@ -627,15 +641,22 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
         
         dailyStats.realizedPnl += (currentPrice - pos.entryPrice) * (sellAmount / BigInt(10**18)) / BigInt(10**18) || 0;
         savePositions();
+        remainingAmount = pos.amount - (pos.soldAmount || 0n);
       }
     }
   }
 
-  // 3. Trailing Stop (lock profits on remaining)
+  // 3. Trailing Stop (lock profits on remaining, but leave moonbag)
   if (currentPrice < BigInt(Math.floor(trailingPrice)) && (pos.soldAmount || 0n) < pos.amount) {
-    logger.info(`[TRAILING] ${pos.symbol} dropped below peak - Selling remaining`);
-    await sendTg(`📉 Trailing stop triggered on ${pos.symbol}`);
-    await sellPosition(pos);
+    let sellAmount = remainingAmount - moonbagAmount;
+    if (sellAmount > 0n) {
+      logger.info(`[TRAILING] ${pos.symbol} dropped below peak - Selling to moonbag`);
+      await sendTg(`📉 Trailing stop on ${pos.symbol} - Selling to ${moonbagPct}% moonbag`);
+      const tempPos = {...pos, amount: sellAmount};
+      await sellPosition(tempPos);
+      pos.soldAmount = (pos.soldAmount || 0n) + sellAmount;
+      savePositions();
+    }
     return;
   }
 
@@ -648,7 +669,6 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
         logger.info(`[RE-ENTRY] ${pos.symbol} dipped ${dipFromEntry.toFixed(1)}% - Adding tiny ${STRATEGY.reEntryAmountEth} ETH`);
         await sendTg(`🔄 Re-buying dip on ${pos.symbol} (${dipFromEntry.toFixed(0)}% down)`);
         
-        // Execute small re-snipe on same curve
         try {
           const curve = new ethers.Contract(pos.token, curveABI, wallet);
           const gasEst = await curve.buy.estimateGas(0n, wallet.address, { value: reAmount });
@@ -657,7 +677,7 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
             gasLimit: gasEst * 130n / 100n
           });
           pos.reEntries = (pos.reEntries || 0) + 1;
-          pos.amount += reAmount; // increase position size (average down)
+          pos.amount += reAmount;
           dailyStats.trades++;
           savePositions();
           logger.info(`[RE-ENTRY SUCCESS] ${pos.symbol}`);
@@ -668,11 +688,12 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
     }
   }
 
-  // 5. Final big TP or trailing on full remaining
-  const seventyPercent = (pos.amount * 70n) / 100n;
-  if (pnlPct >= TAKE_PROFIT * 100 && (pos.soldAmount || 0n) < seventyPercent) {
-    logger.info(`[FINAL TP] ${pos.symbol} - Selling rest`);
-    await sellPosition(pos);
+  // 5. If all ladder hit, leave the moonbag (don't sell the final portion)
+  // Moonbag is held for potential moonshot after DEX migration
+  const moonbagLeft = remainingAmount <= moonbagAmount;
+  if (moonbagLeft) {
+    logger.info(`[MOONBAG HOLD] ${pos.symbol} - ${moonbagPct}% moonbag secured. Holding for moon.`);
+    // Optional: on migration, you could sell more of moonbag, but for now hold
   }
 }
 

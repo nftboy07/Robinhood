@@ -14,12 +14,13 @@
 - Honeypot/gas check before buy.
 - Only snipe if curve progress is reasonable (early-mid).
 
-**Profit Taking & Capital Safety**:
+**Profit Taking & Capital Safety + Moonbag**:
 - **TP Ladder**: Sell 30% at +50%, 30% at +100%, 40% at +200% (configurable).
 - **Trailing Stop**: Trail remaining by 25% from peak to lock profits.
 - **Hard Stop Loss**: Sell all at -20% to protect capital fast (no bag holding).
 - **Re-Entry on Dip**: If drops 30%+ from entry, add tiny 0.00005 ETH (max 2x per position) to lower average.
-- **Post-Graduation**: Auto switch to DEX sell when curve completes (liquidity added).
+- **Moonbag**: Configurable % (default 25%) of original position is **never auto-sold**. Left to ride potential moonshots after DEX migration.
+- **Post-Graduation**: Auto switch to DEX sell for the non-moonbag portion when curve completes (liquidity added).
 
 **Risk Controls**:
 - Max 10 concurrent positions.
