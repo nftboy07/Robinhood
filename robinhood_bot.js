@@ -54,8 +54,8 @@ if (argv.amount) config.snipeAmountEth = argv.amount;
 
 const RPC = config.rpc || 'https://rpc.mainnet.chain.robinhood.com';
 const PRIVATE_KEY = process.env.PK || '';
-const TG_TOKEN = process.env.TG_BOT_TOKEN || '';
-const TG_CHAT = process.env.TG_CHAT_ID || '';
+const TG_TOKEN = process.env.TG_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '';
+const TG_CHAT = process.env.TG_CHAT_ID || process.env.TELEGRAM_CHAT_ID || '';
 
 if (!PRIVATE_KEY || PRIVATE_KEY.includes('YOUR')) {
   console.error('Set PK in .env (use a dedicated small-balance wallet only)');
