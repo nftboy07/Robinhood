@@ -83,8 +83,9 @@ const SLIPPAGE_PCT = config.slippagePct ?? 15;
 const ENABLE_TG = config.enableTelegram !== false;
 
 // ====================== PROVIDER & WALLET ======================
-// Use staticNetwork to avoid ENS lookups on custom chains like 4663
-const provider = new ethers.JsonRpcProvider(RPC, undefined, { staticNetwork: true });
+// Disable ENS for custom chain 4663
+const provider = new ethers.JsonRpcProvider(RPC);
+provider._detectNetwork = () => Promise.resolve(new ethers.Network('robinhood', 4663));
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 // ====================== LOGGING ======================
