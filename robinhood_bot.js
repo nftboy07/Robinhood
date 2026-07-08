@@ -268,7 +268,8 @@ async function sendTg(text, options = {}) {
 async function handleStatus(chatId) {
   const pos = positions.length;
   const dailyPnl = dailyStats.realizedPnl.toFixed(4);
-  const text = `📊 <b>Status</b>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nDryRun: ${DRY_RUN}`;
+  const moonbag = STRATEGY.moonbagPct || 25;
+  const text = `📊 <b>Status</b>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nDryRun: ${DRY_RUN}\nMoonbag: ${moonbag}% held`;
   await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML' });
 }
 
