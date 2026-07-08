@@ -669,7 +669,8 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
   }
 
   // 5. Final big TP or trailing on full remaining
-  if (pnlPct >= TAKE_PROFIT * 100 && (pos.soldAmount || 0n) < pos.amount * 0.7n) {
+  const seventyPercent = (pos.amount * 70n) / 100n;
+  if (pnlPct >= TAKE_PROFIT * 100 && (pos.soldAmount || 0n) < seventyPercent) {
     logger.info(`[FINAL TP] ${pos.symbol} - Selling rest`);
     await sellPosition(pos);
   }
