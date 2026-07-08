@@ -42,6 +42,18 @@ This keeps capital safe while compounding small wins on meme launches.
 - You **only** give me sensitive information (Private Key, Telegram Bot Token, Chat ID, and real contract addresses) through `.env` files.
 - Never paste secrets in chat except when instructing me to put them in .env.
 
+### Leak-Proof / Security (Completed)
+- `.env`, `config.json`, `positions.json` are in `.gitignore` and **never committed**.
+- On VPS: `.env` has `chmod 600` (owner read/write only), owned by `ubuntu`.
+- Bot code loads PK only via `process.env.PK` at runtime — never logged or embedded.
+- PM2 does not dump secrets (dotenv runtime load).
+- Local scans: no real 64-char hex PKs in source (only placeholders in .example files).
+- Always use a dedicated hot wallet with minimal funds.
+- On Windows: restrict .pem and .env with icacls if needed (e.g. `icacls .env /inheritance:r /grant %USERNAME%:R`).
+- For extra: consider `dotenvx` or system secrets (but current setup is standard and audited).
+
+**Funded wallet (~$500 ETH):** Use the address printed by the bot on start (or run the node command above). The bot is now live with real funds using the 0.0001 ETH safe strategy.
+
 This is the complete upgraded version for the NOXA Fun bonding curve launchpad on Robinhood Chain (4663).
 
 **Key upgrades:**
