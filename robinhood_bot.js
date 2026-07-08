@@ -128,7 +128,7 @@ let dailyStats = {
 // Telegram command queue
 let pendingCommands = [];
 
-// ====================== TELEGRAM (ready - add your token + user id later) ======================
+// ====================== TELEGRAM WITH BUTTONS (fun.noxa.fi/robinhood) ======================
 async function initTelegram() {
   if (!TG_TOKEN || !TG_CHAT || !ENABLE_TG) {
     logger.info('Telegram disabled or not configured (add TG_BOT_TOKEN + TG_CHAT_ID later)');
@@ -138,48 +138,146 @@ async function initTelegram() {
     const TelegramBot = require('node-telegram-bot-api');
     telegramBot = new TelegramBot(TG_TOKEN, { polling: true });
 
-    // Command handler for fun.noxa.fi bot
+    // Helper to send main menu with buttons
+    const sendMainMenu = async (chatId, text = '🤖 Robinhood Sniper Menu - fun.noxa.fi/robinhood') => {
+      const opts = {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '📊 Status', callback_data: 'status' },
+              { text: '📍 Positions', callback_data: 'positions' }
+            ],
+            [
+              { text: '💸 Sell All', callback_data: 'sell_all' },
+              { text: '🔄 Force Poll', callback_data: 'poll' }
+            ],
+            [
+              { text: '⚙️ Config', callback_data: 'config' },
+              { text: '🛑 Stop Bot', callback_data: 'stop' }
+            ],
+            [
+              { text: '🔁 Refresh Menu', callback_data: 'menu' }
+            ]
+          ]
+        },
+        parse_mode: 'HTML'
+      };
+      await telegramBot.sendMessage(chatId, text, opts);
+    };
+
+    // Message handler (for /start /menu etc.)
     telegramBot.on('message', async (msg) => {
       if (String(msg.chat.id) !== String(TG_CHAT)) return;
       const text = (msg.text || '').trim().toLowerCase();
 
-      if (text === '/status') {
-        const pos = positions.length;
-        const dailyPnl = dailyStats.realizedPnl.toFixed(4);
-        await sendTg(`📊 Status: ${pos} positions | Daily trades: ${dailyStats.trades} | PnL: ${dailyPnl} ETH`);
+      if (text === '/start' || text === '/menu') {
+        await sendMainMenu(msg.chat.id);
+      } else if (text === '/status') {
+        await handleStatus(msg.chat.id);
       } else if (text === '/positions') {
-        if (positions.length === 0) return sendTg('No open positions');
-        let msg = '📍 Positions:\n';
-        positions.forEach((p, i) => msg += `${i+1}. ${p.symbol} - entry ${ethers.formatEther(p.entryPrice)}\n`);
-        await sendTg(msg);
-      } else if (text.startsWith('/sell ')) {
-        const idx = parseInt(text.split(' ')[1]) - 1;
-        if (positions[idx]) {
-          await sellPosition(positions[idx]);
-          await sendTg('Sell triggered');
-        }
-      } else if (text === '/stop') {
-        process.exit(0);
+        await handlePositions(msg.chat.id);
       } else if (text === '/help') {
-        await sendTg('Commands: /status /positions /sell N /stop');
+        await telegramBot.sendMessage(msg.chat.id, 'Use the menu buttons or /menu\nCommands: /status /positions /sellall');
       }
     });
 
-    logger.info('Telegram alerts + commands ENABLED (fun.noxa.fi mode)');
-    await sendTg('🚀 Robinhood Sniper v1.1 started - focused on fun.noxa.fi/robinhood');
+    // Callback handler for BUTTONS
+    telegramBot.on('callback_query', async (query) => {
+      if (String(query.message.chat.id) !== String(TG_CHAT)) {
+        await telegramBot.answerCallbackQuery(query.id, { text: 'Unauthorized' });
+        return;
+      }
+
+      const data = query.data;
+      const chatId = query.message.chat.id;
+
+      await telegramBot.answerCallbackQuery(query.id); // Acknowledge button press
+
+      if (data === 'status') {
+        await handleStatus(chatId);
+      } else if (data === 'positions') {
+        await handlePositions(chatId);
+      } else if (data === 'sell_all') {
+        if (positions.length === 0) {
+          await sendTg('No open positions to sell.');
+        } else {
+          await sendTg('Selling all positions...');
+          for (const pos of [...positions]) {
+            await sellPosition(pos);
+          }
+        }
+        await sendMainMenu(chatId, '✅ Sell All triggered');
+      } else if (data.startsWith('sell_')) {
+        const idx = parseInt(data.split('_')[1]);
+        if (positions[idx]) {
+          await sellPosition(positions[idx]);
+          await sendTg(`Sold position ${idx + 1}`);
+          await handlePositions(chatId); // refresh list
+        }
+      } else if (data === 'poll') {
+        await sendTg('🔄 Forcing poll for new launches...');
+        await pollNewLaunches();
+        await sendMainMenu(chatId);
+      } else if (data === 'config') {
+        const cfgText = `⚙️ Current Config:\n` +
+          `dryRun: ${DRY_RUN}\n` +
+          `Snipe: ${ethers.formatEther(SNIPE_AMOUNT)} ETH\n` +
+          `SL: ${STOP_LOSS * 100}%\n` +
+          `TP: ${TAKE_PROFIT * 100}%\n` +
+          `Factory: ${FACTORY ? 'SET' : 'PLACEHOLDER (broad scan)'}`;
+        await telegramBot.sendMessage(chatId, cfgText);
+        await sendMainMenu(chatId);
+      } else if (data === 'stop') {
+        await sendTg('🛑 Stopping bot...');
+        process.exit(0);
+      } else if (data === 'menu') {
+        await sendMainMenu(chatId);
+      }
+    });
+
+    logger.info('Telegram alerts + BUTTONS ENABLED (fun.noxa.fi mode)');
+    await sendTg('🚀 Robinhood Sniper started - focused on fun.noxa.fi/robinhood');
+    await sendMainMenu(TG_CHAT, 'Menu ready. Use buttons below:');
   } catch (e) {
     logger.warn('Telegram init failed:', e.message);
   }
 }
 
-async function sendTg(text) {
+async function sendTg(text, options = {}) {
   if (!telegramBot || !TG_CHAT || !ENABLE_TG) return;
   try {
-    await telegramBot.sendMessage(TG_CHAT, text, { parse_mode: 'HTML' });
+    await telegramBot.sendMessage(TG_CHAT, text, { parse_mode: 'HTML', ...options });
   } catch (e) {
     logger.debug('TG send failed: ' + e.message);
   }
 }
+
+async function handleStatus(chatId) {
+  const pos = positions.length;
+  const dailyPnl = dailyStats.realizedPnl.toFixed(4);
+  const text = `📊 <b>Status</b>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nDryRun: ${DRY_RUN}`;
+  await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+}
+
+async function handlePositions(chatId) {
+  if (positions.length === 0) {
+    await telegramBot.sendMessage(chatId, 'No open positions.');
+    return;
+  }
+  let text = '📍 <b>Open Positions</b>\n';
+  positions.forEach((p, i) => {
+    text += `${i+1}. ${p.symbol} | Entry: ${ethers.formatEther(p.entryPrice)}\n`;
+  });
+  const keyboard = {
+    inline_keyboard: positions.map((p, i) => [
+      { text: `💸 Sell ${p.symbol}`, callback_data: `sell_${i}` }
+    ])
+  };
+  await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard });
+}
+
+// Per-position sell buttons are handled inside the main callback_query above.
+// If you want individual sell buttons in positions list, extend the callback handler there.
 
 // ====================== HELPERS ======================
 function loadPositions() {
