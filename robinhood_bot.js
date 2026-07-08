@@ -913,7 +913,9 @@ async function pollNewLaunches() {
 
     lastPolledBlock = current;
   } catch (e) {
-    logger.warn('Poll error: ' + (e.message || e));
+    if (!String(e.message || e).includes('ENS')) {
+      logger.warn('Poll error: ' + (e.message || e));
+    }
     await new Promise(r => setTimeout(r, 700));
   }
 }
