@@ -83,7 +83,8 @@ const SLIPPAGE_PCT = config.slippagePct ?? 15;
 const ENABLE_TG = config.enableTelegram !== false;
 
 // ====================== PROVIDER & WALLET ======================
-const provider = new ethers.JsonRpcProvider(RPC);
+// Use staticNetwork to avoid ENS lookups on custom chains like 4663
+const provider = new ethers.JsonRpcProvider(RPC, undefined, { staticNetwork: true });
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 // ====================== LOGGING ======================
