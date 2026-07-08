@@ -95,9 +95,9 @@ const STRATEGY = config.strategy || {
 const SNIPE_AMOUNT = ethers.parseEther('0.0001'); // forced small for safe meme sniping strategy
 
 // ====================== PROVIDER & WALLET ======================
-// Disable ENS for custom chain 4663
-const provider = new ethers.JsonRpcProvider(RPC);
-provider._detectNetwork = () => Promise.resolve(new ethers.Network('robinhood', 4663));
+// Custom chain 4663 - static network to avoid ENS lookups and errors
+const network = new ethers.Network('robinhood', 4663);
+const provider = new ethers.JsonRpcProvider(RPC, network, { staticNetwork: network });
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 // ====================== LOGGING ======================
@@ -402,7 +402,9 @@ async function handleStatus(chatId) {
   const pos = positions.length;
   const dailyPnl = dailyStats.realizedPnl.toFixed(4);
   const moonbag = STRATEGY.moonbagPct || 25;
-  const text = `📊 <b>Status</b>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nDryRun: ${DRY_RUN}\nMoonbag: ${moonbag}% held`;
+  const bal = await getBalance();
+  const balEth = ethers.formatEther(bal);
+  const text = `📊 <b>Status</b>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nBalance: ${balEth} ETH\nDryRun: ${DRY_RUN}\nMoonbag: ${moonbag}% held`;
   await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML' });
 }
 
@@ -471,6 +473,13 @@ async function getCurrentPrice(tokenAddr) {
   try {
     const curve = new ethers.Contract(tokenAddr, curveABI, provider);
     return await curve.getPrice();
+  } catch { return 0n; }
+}
+
+async function getBalance() {
+  try {
+    const bal = await provider.getBalance(wallet.address);
+    return bal;
   } catch { return 0n; }
 }
 
@@ -577,6 +586,13 @@ async function sellOnDex(tokenAddress, tokenAmount) {
 async function snipe(curveAddress, symbol) {
   if (positions.length >= MAX_POS) return;
   if (!checkRiskLimits()) return;
+
+  const bal = await getBalance();
+  if (bal < SNIPE_AMOUNT * 2n) {
+    logger.warn(`[SKIP SNIPE] Low balance ${ethers.formatEther(bal)} ETH`);
+    await sendTg(`⚠️ Low balance ${ethers.formatEther(bal)} ETH - skipping snipe`);
+    return;
+  }
 
   logger.info(`[SNIPE] ${symbol} @ ${curveAddress} | ${ethers.formatEther(SNIPE_AMOUNT)} ETH (fun.noxa.fi)`);
 
