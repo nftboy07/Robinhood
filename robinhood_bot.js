@@ -245,6 +245,11 @@ async function initTelegram() {
         process.exit(0);
       } else if (data === 'menu') {
         await sendMainMenu(chatId);
+      } else if (data.startsWith('buy_')) {
+        const parts = data.split('_');
+        const addr = parts[1];
+        const amt = parts[2];
+        await buyToken(addr, amt);
       }
     });
 
@@ -262,6 +267,85 @@ async function sendTg(text, options = {}) {
     await telegramBot.sendMessage(TG_CHAT, text, { parse_mode: 'HTML', ...options });
   } catch (e) {
     logger.debug('TG send failed: ' + e.message);
+  }
+}
+
+// Send buy menu for a newly detected token with specific amounts
+async function sendBuyMenu(tokenAddr, symbol) {
+  if (!telegramBot || !TG_CHAT || !ENABLE_TG) return;
+  const text = `🚀 <b>New Launch Detected</b>\n${symbol}\n<code>${tokenAddr}</code>\n\nChoose buy amount (ETH):`;
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "0.003", callback_data: `buy_${tokenAddr}_0.003` },
+        { text: "0.005", callback_data: `buy_${tokenAddr}_0.005` }
+      ],
+      [
+        { text: "0.007", callback_data: `buy_${tokenAddr}_0.007` },
+        { text: "0.01", callback_data: `buy_${tokenAddr}_0.01` }
+      ],
+      [
+        { text: "Auto 0.0001", callback_data: `buy_${tokenAddr}_0.0001` }
+      ]
+    ]
+  };
+  await telegramBot.sendMessage(TG_CHAT, text, { parse_mode: 'HTML', reply_markup: keyboard });
+}
+
+// General buy function for variable amount
+async function buyToken(curveAddress, amountStr) {
+  const buyAmount = ethers.parseEther(amountStr);
+  logger.info(`[MANUAL BUY] ${curveAddress} for ${amountStr} ETH`);
+
+  if (DRY_RUN) {
+    await sendTg(`🟡 DRY RUN: Would buy ${amountStr} on ${curveAddress}`);
+    return;
+  }
+
+  const curve = new ethers.Contract(curveAddress, curveABI, wallet);
+  try {
+    const gasEst = await curve.buy.estimateGas(0n, wallet.address, { value: buyAmount });
+    const feeData = await provider.getFeeData();
+    const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
+
+    const tx = await curve.buy(0n, wallet.address, {
+      value: buyAmount,
+      gasLimit: gasEst * 140n / 100n,
+      maxFeePerGas: maxFee,
+      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
+    });
+    const receipt = await tx.wait();
+    logger.info(`[BOUGHT] tx: ${receipt.transactionHash}`);
+    await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${receipt.transactionHash}</code>`);
+
+    // Add to positions (simplified)
+    const transferTopic = ethers.id('Transfer(address,address,uint256)');
+    const log = receipt.logs.find(l => l.topics[0] === transferTopic);
+    const amount = log ? BigInt(log.data) : 0n;
+    const entryPrice = await getCurrentPrice(curveAddress);
+
+    // Check if already have position
+    const existing = positions.find(p => p.token === curveAddress);
+    if (existing) {
+      existing.amount += amount;
+    } else {
+      positions.push({
+        token: curveAddress,
+        symbol: 'MANUAL',
+        amount,
+        entryPrice,
+        highestPrice: entryPrice,
+        isMigrated: false,
+        entryBlock: receipt.blockNumber,
+        soldAmount: 0n,
+        reEntries: 0,
+        tpReached: []
+      });
+    }
+    savePositions();
+  } catch (e) {
+    logger.error(`[BUY FAIL]: ${e.message}`);
+    await sendTg(`❌ Buy failed: ${e.message.slice(0,100)}`);
   }
 }
 
@@ -723,9 +807,13 @@ async function pollNewLaunches() {
         const symbol = 'NEW';
         logger.info(`[NEW LAUNCH] ${token} on fun.noxa.fi/robinhood`);
         await sendTg(`🚀 New launch detected: <code>${token}</code>`);
+        // Send buy buttons with specific amounts
+        await sendBuyMenu(token, symbol);
+        // Keep small auto snipe if desired
         setTimeout(() => snipe(token, symbol), 1800);
       } catch {
         const token = '0x' + log.topics[1].slice(-40);
+        await sendBuyMenu(token, 'LAUNCH');
         setTimeout(() => snipe(token, 'LAUNCH'), 2000);
       }
     }
