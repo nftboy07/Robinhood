@@ -165,6 +165,39 @@ node discover.js
 node robinhood_bot.js
 ```
 
+## Telegram Bot Commands & Buttons
+
+The bot has a full Telegram interface (send `/menu` or `/start` to your bot to open it).
+
+**Text commands:**
+- `/menu` or `/start` — Open the main button menu
+- `/status` — Show current positions, PnL, balance, dryRun state
+- `/positions` — List open positions (with per-position Sell buttons)
+- `/help` — List commands
+
+**Main Menu Buttons:**
+- 📊 Status — Same as /status
+- 📍 Positions — Same as /positions
+- 💸 Sell All — Sell every open position
+- 🔄 Force Poll — Manually scan for new launches
+- ⚙️ Config — Show current settings
+- 🛑 Stop Bot — Gracefully shut down the bot
+- 📋 Recent Launches — List last ~5 detected tokens (click to open buy menu)
+- 🔁 Refresh Menu — Re-send the menu
+
+**When a new launch is detected:**
+The bot automatically posts a message with:
+- Real token name (or "Unnamed Meme Token (short address)" if none)
+- Full address
+- Explorer link
+- Inline buy buttons: **0.003 | 0.005 | 0.007 | 0.01 | Auto 0.0001**
+
+Click any button to execute a manual buy with that exact amount on the curve.
+
+**Recent Launches** also gives you buy options for the last detected tokens.
+
+All buttons are tied directly to the on-chain addresses from the launch events, so buying works even for tokens that have no on-chain name yet.
+
 Environment:
 ```
 PK=0xYOUR_PRIVATE_KEY_HERE
