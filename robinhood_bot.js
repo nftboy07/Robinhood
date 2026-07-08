@@ -294,22 +294,32 @@ async function sendTg(text, options = {}) {
   }
 }
 
-// Helper to fetch real token name and symbol from the contract
+// Helper to fetch real token name and symbol from the contract + Blockscout for nameless memes
 async function getTokenInfo(addr) {
+  let name = "Unknown Token";
+  let symbol = "???";
   try {
     const erc20Abi = [
       "function name() view returns (string)",
       "function symbol() view returns (string)"
     ];
     const token = new ethers.Contract(addr, erc20Abi, provider);
-    const [name, symbol] = await Promise.all([
-      token.name().catch(() => "Unknown Token"),
-      token.symbol().catch(() => "???")
+    [name, symbol] = await Promise.all([
+      token.name().catch(() => name),
+      token.symbol().catch(() => symbol)
     ]);
-    return { name, symbol };
-  } catch {
-    return { name: "Unknown Token", symbol: "???" };
-  }
+  } catch {}
+  // Fallback: query Blockscout API for indexed name/creator/tx for nameless tokens
+  try {
+    const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${addr}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.name && data.name !== name) name = data.name;
+      if (data.symbol && data.symbol !== symbol) symbol = data.symbol;
+      // Can add creator: data.creator?.hash or creation tx
+    }
+  } catch (e) {}
+  return { name, symbol };
 }
 
 // Send buy menu for a newly detected token with specific amounts
@@ -321,7 +331,8 @@ async function sendBuyMenu(tokenAddr, fallbackSymbol = "NEW") {
     displayName = `Unnamed Meme Token`;
   }
   const shortAddr = tokenAddr.slice(0, 6) + "..." + tokenAddr.slice(-4);
-  const text = `🚀 <b>New Launch Detected</b>\n${displayName}\n<code>${tokenAddr}</code> (${shortAddr})\n\nChoose buy amount (ETH):`;
+  const explorer = `https://robinhoodchain.blockscout.com/address/${tokenAddr}`;
+  const text = `🚀 <b>New Launch Detected</b>\n${displayName}\n<code>${tokenAddr}</code> (${shortAddr})\n<a href="${explorer}">View on Explorer</a>\n\nChoose buy amount (ETH):`;
   const keyboard = {
     inline_keyboard: [
       [
