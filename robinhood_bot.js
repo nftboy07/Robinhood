@@ -65,7 +65,6 @@ if (!PRIVATE_KEY || PRIVATE_KEY.includes('YOUR')) {
 const FACTORY = config.factory || '';
 const WETH = config.weth || '';
 const ROUTER = config.router || '';
-const SNIPE_AMOUNT = ethers.parseEther(config.snipeAmountEth || '0.05');
 const STOP_LOSS = config.stopLossPct ?? 0.15;
 const TAKE_PROFIT = config.takeProfitPct ?? 0.60;
 const TRAILING = config.trailingStopPct ?? 0.08;
@@ -81,6 +80,18 @@ const MAX_DAILY_LOSS_PCT = config.maxDailyLossPct ?? 25;
 const MAX_TRADES_PER_HOUR = config.maxTradesPerHour ?? 12;
 const SLIPPAGE_PCT = config.slippagePct ?? 15;
 const ENABLE_TG = config.enableTelegram !== false;
+
+// Strategy config (safe small amount sniping)
+const STRATEGY = config.strategy || {
+  tpLadder: [0.5, 1.0, 2.0],
+  tpSellPercents: [30, 30, 40],
+  reEntryOnDip: true,
+  reEntryDipPct: 0.30,
+  reEntryAmountEth: "0.00005",
+  maxReEntriesPerPosition: 2
+};
+
+const SNIPE_AMOUNT = ethers.parseEther(config.snipeAmountEth || '0.0001');
 
 // ====================== PROVIDER & WALLET ======================
 // Disable ENS for custom chain 4663
@@ -289,7 +300,9 @@ function loadPositions() {
         ...p,
         amount: BigInt(p.amount),
         entryPrice: BigInt(p.entryPrice),
-        highestPrice: BigInt(p.highestPrice || p.entryPrice)
+        highestPrice: BigInt(p.highestPrice || p.entryPrice),
+        soldAmount: p.soldAmount ? BigInt(p.soldAmount) : 0n,
+        reEntries: p.reEntries || 0
       }));
     }
   } catch (e) {}
@@ -301,7 +314,9 @@ function savePositions() {
       ...p,
       amount: p.amount.toString(),
       entryPrice: p.entryPrice.toString(),
-      highestPrice: p.highestPrice.toString()
+      highestPrice: p.highestPrice.toString(),
+      soldAmount: (p.soldAmount || 0n).toString(),
+      reEntries: p.reEntries || 0
     }));
     fs.writeFileSync(POSITIONS_FILE, JSON.stringify(serial, null, 2));
   } catch (e) {}
@@ -483,7 +498,18 @@ async function snipe(curveAddress, symbol) {
     const amount = log ? BigInt(log.data) : estimated || 0n;
     const entryPrice = await getCurrentPrice(curveAddress);
 
-    positions.push({ token: curveAddress, symbol, amount, entryPrice, highestPrice: entryPrice, isMigrated: false, entryBlock: receipt.blockNumber });
+    positions.push({ 
+      token: curveAddress, 
+      symbol, 
+      amount, 
+      entryPrice, 
+      highestPrice: entryPrice, 
+      isMigrated: false, 
+      entryBlock: receipt.blockNumber,
+      soldAmount: 0n,
+      reEntries: 0,
+      tpReached: [] // for ladder
+    });
     dailyStats.trades++;
     savePositions();
 
@@ -530,12 +556,10 @@ async function monitorPositions() {
     try {
       const price = await getCurrentPrice(pos.token);
       if (!price || price === 0n) {
-        // Try to detect if migrated (price query fails but pair may exist)
         if (ROUTER && !pos.isMigrated) {
-          // Simple migration heuristic: if curve price stopped working, assume graduated
           pos.isMigrated = true;
-          logger.info(`[MIGRATED?] ${pos.symbol} switched to DEX mode`);
-          await sendTg(`🔄 ${pos.symbol} likely graduated to DEX`);
+          logger.info(`[MIGRATED] ${pos.symbol} switched to DEX mode`);
+          await sendTg(`🔄 ${pos.symbol} graduated to DEX - will use DEX sells`);
         }
         continue;
       }
@@ -544,20 +568,110 @@ async function monitorPositions() {
       const curr = Number(price);
       const pnl = entry > 0 ? ((curr - entry) / entry) * 100 : 0;
 
-      let reason = null;
-      if (pnl <= -STOP_LOSS * 100) reason = 'STOP_LOSS';
-      else if (pnl >= TAKE_PROFIT * 100) reason = 'TAKE_PROFIT';
-      else if (pos.highestPrice && price < pos.highestPrice * BigInt(Math.floor((1 - TRAILING) * 1000)) / 1000n) reason = 'TRAILING';
-
+      // Update peak
       if (price > pos.highestPrice) pos.highestPrice = price;
 
-      if (reason) {
-        logger.info(`[${reason}] ${pos.symbol} PnL: ${pnl.toFixed(1)}%`);
-        dailyStats.realizedPnl += (price - pos.entryPrice) * (pos.amount / BigInt(10**18)) / BigInt(10**18) || 0; // rough
-        await sendTg(`📉 <b>${reason}</b> ${pos.symbol} | PnL ${pnl.toFixed(1)}%`);
-        await sellPosition(pos);
+      // === SAFE MEME STRATEGY IMPLEMENTATION ===
+      await manageSafeStrategy(pos, price, pnl);
+
+    } catch (e) {
+      logger.debug(`Monitor error for ${pos.symbol}: ${e.message}`);
+    }
+  }
+}
+
+// === CORE STRATEGY: Small amount snipe + Capital safe profit taking ===
+async function manageSafeStrategy(pos, currentPrice, pnlPct) {
+  const entryPrice = Number(pos.entryPrice);
+  const remainingAmount = pos.amount - (pos.soldAmount || 0n);
+  if (remainingAmount <= 0n) {
+    positions = positions.filter(p => p.token !== pos.token);
+    savePositions();
+    return;
+  }
+
+  const peak = Number(pos.highestPrice);
+  const trailingPrice = peak * (1 - TRAILING);
+
+  // 1. Hard Stop Loss - protect capital fast
+  if (pnlPct <= -STOP_LOSS * 100) {
+    logger.info(`[SL] ${pos.symbol} PnL ${pnlPct.toFixed(1)}% - Selling remaining for capital protection`);
+    await sendTg(`🛡️ SL hit on ${pos.symbol} (${pnlPct.toFixed(1)}%) - Protecting capital`);
+    await sellPosition(pos);
+    dailyStats.realizedPnl += (currentPrice - pos.entryPrice) * (remainingAmount / BigInt(10**18)) / BigInt(10**18) || 0;
+    return;
+  }
+
+  // 2. TP Ladder (partial sells for safe profits)
+  const tpLadder = STRATEGY.tpLadder || [0.5, 1.0, 2.0];
+  const sellPercents = STRATEGY.tpSellPercents || [30, 30, 40];
+  const currentMultiplier = currentPrice / entryPrice;
+
+  for (let i = 0; i < tpLadder.length; i++) {
+    const target = tpLadder[i];
+    if (currentMultiplier >= target && !(pos.tpReached || []).includes(i)) {
+      const sellPct = sellPercents[i] || 30;
+      const sellAmount = (remainingAmount * BigInt(Math.floor(sellPct))) / 100n;
+
+      if (sellAmount > 0n) {
+        logger.info(`[TP${i+1}] ${pos.symbol} reached ${target}x - Selling ${sellPct}%`);
+        await sendTg(`💰 TP${i+1} hit on ${pos.symbol} (${(target*100).toFixed(0)}% gain) - Selling ${sellPct}%`);
+        
+        // Partial sell logic
+        const tempPos = {...pos, amount: sellAmount};
+        await sellPosition(tempPos);
+        
+        pos.soldAmount = (pos.soldAmount || 0n) + sellAmount;
+        pos.tpReached = pos.tpReached || [];
+        pos.tpReached.push(i);
+        
+        dailyStats.realizedPnl += (currentPrice - pos.entryPrice) * (sellAmount / BigInt(10**18)) / BigInt(10**18) || 0;
+        savePositions();
       }
-    } catch (e) {}
+    }
+  }
+
+  // 3. Trailing Stop (lock profits on remaining)
+  if (currentPrice < BigInt(Math.floor(trailingPrice)) && (pos.soldAmount || 0n) < pos.amount) {
+    logger.info(`[TRAILING] ${pos.symbol} dropped below peak - Selling remaining`);
+    await sendTg(`📉 Trailing stop triggered on ${pos.symbol}`);
+    await sellPosition(pos);
+    return;
+  }
+
+  // 4. Re-entry on dip for better average (capital safe - very small)
+  if (STRATEGY.reEntryOnDip && (pos.reEntries || 0) < (STRATEGY.maxReEntriesPerPosition || 2)) {
+    const dipFromEntry = (entryPrice - currentPrice) / entryPrice * 100;
+    if (dipFromEntry >= (STRATEGY.reEntryDipPct || 30) * 100) {
+      const reAmount = ethers.parseEther(STRATEGY.reEntryAmountEth || '0.00005');
+      if (reAmount > 0n) {
+        logger.info(`[RE-ENTRY] ${pos.symbol} dipped ${dipFromEntry.toFixed(1)}% - Adding tiny ${STRATEGY.reEntryAmountEth} ETH`);
+        await sendTg(`🔄 Re-buying dip on ${pos.symbol} (${dipFromEntry.toFixed(0)}% down)`);
+        
+        // Execute small re-snipe on same curve
+        try {
+          const curve = new ethers.Contract(pos.token, curveABI, wallet);
+          const gasEst = await curve.buy.estimateGas(0n, wallet.address, { value: reAmount });
+          await curve.buy(0n, wallet.address, {
+            value: reAmount,
+            gasLimit: gasEst * 130n / 100n
+          });
+          pos.reEntries = (pos.reEntries || 0) + 1;
+          pos.amount += reAmount; // increase position size (average down)
+          dailyStats.trades++;
+          savePositions();
+          logger.info(`[RE-ENTRY SUCCESS] ${pos.symbol}`);
+        } catch (e) {
+          logger.warn(`Re-entry failed for ${pos.symbol}: ${e.message}`);
+        }
+      }
+    }
+  }
+
+  // 5. Final big TP or trailing on full remaining
+  if (pnlPct >= TAKE_PROFIT * 100 && (pos.soldAmount || 0n) < pos.amount * 0.7n) {
+    logger.info(`[FINAL TP] ${pos.symbol} - Selling rest`);
+    await sellPosition(pos);
   }
 }
 

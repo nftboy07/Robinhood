@@ -1,6 +1,40 @@
 # Robinhood Chain (4663) + fun.noxa.fi Sniper Bot
 
-**FULL UPGRADED — Production sniper focused on https://fun.noxa.fi/robinhood**
+**FULL UPGRADED — Automatic Meme Sniper for https://fun.noxa.fi/robinhood (Bonding Curve)**
+
+## SAFE AUTOMATIC MEME SNIPING STRATEGY (Implemented)
+
+**Core Philosophy**: Tiny entries (0.0001 ETH) to minimize risk, aggressive but safe profit taking via ladder + trailing, quick capital protection on losses, limited averaging on dips, full auto on curve → DEX.
+
+**Snipe Amount**: Fixed small **0.0001 ETH** per new launch (configurable, ~$0.15-0.30 depending on ETH price). Never risk big on one meme.
+
+**Entry**:
+- Auto-detect new launches via poll on fun.noxa.fi factory/events.
+- Immediate snipe on curve (first-mover advantage).
+- Honeypot/gas check before buy.
+- Only snipe if curve progress is reasonable (early-mid).
+
+**Profit Taking & Capital Safety**:
+- **TP Ladder**: Sell 30% at +50%, 30% at +100%, 40% at +200% (configurable).
+- **Trailing Stop**: Trail remaining by 25% from peak to lock profits.
+- **Hard Stop Loss**: Sell all at -20% to protect capital fast (no bag holding).
+- **Re-Entry on Dip**: If drops 30%+ from entry, add tiny 0.00005 ETH (max 2x per position) to lower average.
+- **Post-Graduation**: Auto switch to DEX sell when curve completes (liquidity added).
+
+**Risk Controls**:
+- Max 10 concurrent positions.
+- Max daily loss 5% (stops sniping).
+- Max 20 trades/hour.
+- Max re-entries limited.
+- Always start in dryRun: true. Test thoroughly.
+
+**Automation**:
+- Runs 24/7 via PM2 on VPS.
+- Continuous fast polling (800ms).
+- Full TG buttons for control (/menu).
+- Logs every decision.
+
+This keeps capital safe while compounding small wins on meme launches.
 
 **Important for you:**
 - I handle **ALL** GitHub work (commits, pushes) and **ALL** VPS work (pull, install, config, PM2, restarts).
@@ -18,6 +52,7 @@ This is the complete upgraded version for the NOXA Fun bonding curve launchpad o
 - CLI flags + robust RPC handling
 - PM2 ready for VPS
 - Honeypot checks, daily loss limits, max trades per hour
+- **Automatic safe strategy**: 0.0001 ETH snipes, TP ladder + trailing, re-entries on dips, capital protection SL
 
 **⚠️ WARNING** — Only use with money you can afford to lose. Always start in dry-run.
 
