@@ -70,7 +70,7 @@ const TAKE_PROFIT = config.takeProfitPct ?? 0.60;
 const TRAILING = config.trailingStopPct ?? 0.08;
 const POLL_MS = config.pollIntervalMs || 1100;
 const GAS_MULT = config.gasMultiplier || 1.8;
-const DRY_RUN = config.dryRun !== false;
+const DRY_RUN = !!config.dryRun;
 const MAX_POS = config.maxConcurrentPositions || 8;
 const POSITIONS_FILE = config.positionsFile || 'positions.json';
 

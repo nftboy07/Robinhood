@@ -12,7 +12,7 @@
   "trailingStopPct": 0.25,
   "pollIntervalMs": 800,
   "gasMultiplier": 2.0,
-  "dryRun": true,
+  "dryRun": false,
   "logLevel": "info",
   "positionsFile": "positions.json",
   "eventTopic": "0x6e6ae68e7d7d45fbd855c40d1eaafa8de46c5fbec3ee26f1af88730e400bc92c",
