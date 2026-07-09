@@ -676,7 +676,7 @@ async function isHoneypotOrBad(curveAddress) {
   if (!HONEYPOT_CHECK) return false;
   try {
     const curve = new ethers.Contract(curveAddress, curveABI, provider);
-    const testAmount = ethers.parseEther('0.01');
+    const testAmount = ethers.parseEther('0.001'); // smaller test for low balance wallets
 
     // Simulate buy
     const buyGas = await curve.buy.estimateGas(1n, wallet.address, { value: testAmount });
