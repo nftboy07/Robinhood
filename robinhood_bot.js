@@ -180,6 +180,18 @@ async function initTelegram() {
         parse_mode: 'HTML'
       };
       await telegramBot.sendMessage(chatId, text, opts);
+      // Also set a fast persistent reply keyboard for quick commands
+      const replyOpts = {
+        reply_markup: {
+          keyboard: [
+            ['/s', '/p', '/sa'],
+            ['/r', '/poll', '/menu']
+          ],
+          resize_keyboard: true,
+          one_time_keyboard: false
+        }
+      };
+      await telegramBot.sendMessage(chatId, 'Fast commands (tap or type):', replyOpts);
     };
 
     // Message handler (for /start /menu etc.)
