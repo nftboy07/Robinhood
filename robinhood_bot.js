@@ -255,6 +255,7 @@ async function initTelegram() {
  /pnl - Portfolio PnL estimate
  /holdings /tokens - Wallet token balances
  /last - Last launch
+ /refresh /fixpos - Refresh positions from on-chain balances/names
  /strategy - Auto sell strategy
  /poll - Force poll
  /recent /r - Recent
@@ -374,19 +375,21 @@ All outputs use real mainnet data + explorer links.`;
           await telegramBot.sendMessage(msg.chat.id, 'Usage: /price 0xaddr');
         }
       } else if (text === '/pnl' || text === '/profit') {
-        let totalRealized = 0;
         let totalUnreal = 0;
         let totalSpent = 0;
+        let hasIncomplete = false;
         for (const p of positions) {
-          totalSpent += Number(ethers.formatEther(p.entryPrice || 0n)) * (Number(ethers.formatEther(p.amount || 0n)) / 1e18); // rough
+          const spent = Number(ethers.formatEther(p.entryPrice || 0n));
+          if (spent === 0) hasIncomplete = true;
+          totalSpent += spent;
           const currP = await getCurrentPrice(p.token);
           const pnlPct = (p.entryPrice > 0n && currP > 0n) ? ((Number(currP) - Number(p.entryPrice)) / Number(p.entryPrice)) * 100 : 0;
           const unreal = Number(ethers.formatEther(p.amount || 0n)) * (pnlPct / 100);
           totalUnreal += unreal;
-          // realized from sold would need tracking, approx 0 for now
         }
         const bal = await getBalance();
-        await telegramBot.sendMessage(msg.chat.id, `📊 <b>PnL (Mainnet)</b>\nPositions: ${positions.length}\nUnrealized PnL: ~${totalUnreal.toFixed(6)} ETH\nEst Total Spent: ~${totalSpent.toFixed(4)} ETH\nCurrent Bal: ${ethers.formatEther(bal)} ETH\n(Realized tracked in dailyStats)`);
+        let note = hasIncomplete ? '\n(Note: some positions have incomplete entry tracking - PnL approximate)' : '';
+        await telegramBot.sendMessage(msg.chat.id, `📊 <b>PnL (Mainnet)</b>\nPositions: ${positions.length}\nUnrealized PnL: ~${totalUnreal.toFixed(6)} ETH\nEst Total Spent: ~${totalSpent.toFixed(4)} ETH\nCurrent Bal: ${ethers.formatEther(bal)} ETH\n(Realized tracked in dailyStats)${note}`);
       } else if (text === '/holdings' || text === '/tokens') {
         let out = '🪙 <b>Holdings (Mainnet)</b>\n';
         const addrs = [...new Set(positions.map(p => p.token).concat(recentLaunches.map(l => l.addr)))];
@@ -407,6 +410,26 @@ All outputs use real mainnet data + explorer links.`;
         } else {
           await telegramBot.sendMessage(msg.chat.id, 'No recent launches tracked.');
         }
+      } else if (text === '/refresh' || text === '/fixpos') {
+        await sendTg('Refreshing positions from on-chain...');
+        for (const p of positions) {
+          if (p.amount === 0n || p.entryPrice === 0n) {
+            const bal = await getTokenBalance(p.token, wallet.address);
+            if (bal > 0n) {
+              p.amount = bal;
+              if (p.entryPrice === 0n) {
+                // rough, user can note spent
+                p.entryPrice = 0n; // can't recover spent easily
+              }
+            }
+          }
+          const info = await getTokenInfo(p.token);
+          if (info.name && !info.name.includes('Unknown')) {
+            p.symbol = `${info.name} (${info.symbol})`;
+          }
+        }
+        savePositions();
+        await handlePositions(msg.chat.id);
       }
     });
 
@@ -617,6 +640,7 @@ async function buyToken(curveAddress, amountStr) {
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
     // Use direct sendTransaction to the curve addr (many bonding curves accept ETH directly for buy)
+    const balBefore = await getTokenBalance(curveAddress, wallet.address);
     const tx = await wallet.sendTransaction({
       to: curveAddress,
       value: buyAmount,
@@ -631,10 +655,9 @@ async function buyToken(curveAddress, amountStr) {
     await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
     await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
 
-    // Add to positions (simplified)
-    const transferTopic = ethers.id('Transfer(address,address,uint256)');
-    const log = receipt.logs.find(l => l.topics[0] === transferTopic);
-    const amount = log ? BigInt(log.data) : 0n;
+    // Add to positions using actual balance diff (robust for curve/token)
+    const balAfter = await getTokenBalance(curveAddress, wallet.address);
+    const amount = balAfter > balBefore ? (balAfter - balBefore) : 0n;
     if (amount === 0n) {
       logger.warn(`[BUY] No tokens received for ${curveAddress}`);
       await sendTg(`⚠️ Buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
@@ -642,7 +665,6 @@ async function buyToken(curveAddress, amountStr) {
     }
     let entryPrice = await getCurrentPrice(curveAddress);
     if (entryPrice === 0n && amount > 0n) {
-      // fallback calculate effective entry (ETH per token unit, matching getPrice scale)
       entryPrice = (buyAmount * (10n ** 18n)) / amount;
     }
     const info = await getTokenInfo(curveAddress);
@@ -680,6 +702,7 @@ async function forceBuy(curveAddress, amountStr) {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
+    const balBefore = await getTokenBalance(curveAddress, wallet.address);
     const tx = await wallet.sendTransaction({
       to: curveAddress,
       value: buyAmount,
@@ -694,10 +717,9 @@ async function forceBuy(curveAddress, amountStr) {
     await sendAlert(`✅ Force Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
     await sendTg(`✅ Force Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
 
-    // Add to positions
-    const transferTopic = ethers.id('Transfer(address,address,uint256)');
-    const log = receipt.logs.find(l => l.topics[0] === transferTopic);
-    const amount = log ? BigInt(log.data) : 0n;
+    // Add to positions using actual balance diff
+    const balAfter = await getTokenBalance(curveAddress, wallet.address);
+    const amount = balAfter > balBefore ? (balAfter - balBefore) : 0n;
     if (amount === 0n) {
       logger.warn(`[FORCE BUY] No tokens received for ${curveAddress}`);
       await sendTg(`⚠️ Force buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
@@ -740,7 +762,9 @@ async function handleStatus(chatId) {
   const bal = await getBalance();
   const balEth = ethers.formatEther(bal);
   const walletLink = `${EXPLORER}/address/${wallet.address}`;
-  const text = `📊 <b>Status</b>\nWallet: <a href="${walletLink}">${wallet.address}</a>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nBalance: ${balEth} ETH\nMode: LIVE MAINNET\nMoonbag: ${moonbag}% held`;
+  let note = '';
+  if (positions.some(p => p.entryPrice === 0n || p.amount === 0n)) note = '\n(Note: some positions have incomplete tracking from past buys - verify on explorer)';
+  const text = `📊 <b>Status</b>\nWallet: <a href="${walletLink}">${wallet.address}</a>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nBalance: ${balEth} ETH\nMode: LIVE MAINNET\nMoonbag: ${moonbag}% held${note}`;
   await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML' });
 }
 
@@ -753,7 +777,9 @@ async function handlePositions(chatId) {
   positions.forEach((p, i) => {
     const entry = ethers.formatEther(p.entryPrice);
     const sold = p.soldAmount ? ethers.formatEther(p.soldAmount) : '0';
-    text += `${i+1}. ${p.symbol} (${p.token})\n   Entry: ${entry} | Sold: ${sold} | Re-entries: ${p.reEntries || 0}\n`;
+    let entryStr = entry;
+    if (p.entryPrice === 0n) entryStr = "0 (tracking incomplete - check tx for actual spent)";
+    text += `${i+1}. ${p.symbol} (${p.token})\n   Entry: ${entryStr} | Sold: ${sold} | Re-entries: ${p.reEntries || 0}\n`;
   });
   const keyboard = {
     inline_keyboard: positions.map((p, i) => [
@@ -854,6 +880,13 @@ async function getCurrentPrice(tokenAddr) {
   try {
     const curve = new ethers.Contract(tokenAddr, curveABI, provider);
     return await curve.getPrice();
+  } catch { return 0n; }
+}
+
+async function getTokenBalance(tokenAddr, owner) {
+  try {
+    const erc = new ethers.Contract(tokenAddr, ["function balanceOf(address) view returns (uint256)"], provider);
+    return await erc.balanceOf(owner);
   } catch { return 0n; }
 }
 
@@ -1031,6 +1064,7 @@ async function snipe(curveAddress, symbol) {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
+    const balBefore = await getTokenBalance(curveAddress, wallet.address);
     const tx = await wallet.sendTransaction({
       to: curveAddress,
       value: SNIPE_AMOUNT,
@@ -1043,9 +1077,8 @@ async function snipe(curveAddress, symbol) {
     const txHash = receipt.hash || receipt.transactionHash || 'unknown';
     logger.info(`[BOUGHT] ${symbol} tx: ${txHash}`);
 
-    const transferTopic = ethers.id('Transfer(address,address,uint256)');
-    const log = receipt.logs.find(l => l.topics[0] === transferTopic);
-    const amount = log ? BigInt(log.data) : estimated || 0n;
+    const balAfter = await getTokenBalance(curveAddress, wallet.address);
+    const amount = balAfter > balBefore ? (balAfter - balBefore) : (estimated || 0n);
     if (amount === 0n) {
       logger.warn(`[SNIPE] No tokens received for ${curveAddress}`);
       await sendTg(`⚠️ Snipe tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
