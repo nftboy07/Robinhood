@@ -550,6 +550,11 @@ async function buyToken(curveAddress, amountStr) {
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const log = receipt.logs.find(l => l.topics[0] === transferTopic);
     const amount = log ? BigInt(log.data) : 0n;
+    if (amount === 0n) {
+      logger.warn(`[BUY] No tokens received for ${curveAddress}`);
+      await sendTg(`⚠️ Buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
+      return;
+    }
     let entryPrice = await getCurrentPrice(curveAddress);
     if (entryPrice === 0n && amount > 0n) {
       // fallback calculate effective entry (ETH per token unit, matching getPrice scale)
@@ -610,6 +615,11 @@ async function forceBuy(curveAddress, amountStr) {
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const log = receipt.logs.find(l => l.topics[0] === transferTopic);
     const amount = log ? BigInt(log.data) : 0n;
+    if (amount === 0n) {
+      logger.warn(`[FORCE BUY] No tokens received for ${curveAddress}`);
+      await sendTg(`⚠️ Force buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
+      return;
+    }
     let entryPrice = await getCurrentPrice(curveAddress);
     if (entryPrice === 0n && amount > 0n) {
       entryPrice = (buyAmount * (10n ** 18n)) / amount;
@@ -952,6 +962,11 @@ async function snipe(curveAddress, symbol) {
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const log = receipt.logs.find(l => l.topics[0] === transferTopic);
     const amount = log ? BigInt(log.data) : estimated || 0n;
+    if (amount === 0n) {
+      logger.warn(`[SNIPE] No tokens received for ${curveAddress}`);
+      await sendTg(`⚠️ Snipe tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
+      return;
+    }
     let entryPrice = await getCurrentPrice(curveAddress);
     if (entryPrice === 0n && amount > 0n) {
       entryPrice = (SNIPE_AMOUNT * (10n ** 18n)) / amount;
