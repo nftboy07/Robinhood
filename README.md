@@ -300,6 +300,30 @@ See `config.json.example`. Key fields:
 - Honeypot / rug checks before snipe (use tx simulation or external APIs)
 - Multi-wallet rotation
 
+## Updating the bot on VPS (Live Mainnet)
+
+After any code change (including this dry-run removal):
+
+1. SSH to your VPS (use your PEM):
+   ```
+   ssh -i /path/to/your.pem ubuntu@3.69.242.140
+   ```
+
+2. Run these commands:
+   ```
+   cd ~/robinhood-bot
+   git pull origin main
+   npm install --production
+   pm2 restart robinhood-sniper --update-env
+   pm2 logs robinhood-sniper --lines 30
+   ```
+
+3. In Telegram: `/menu` or `/s` to confirm it's running the new version (no "DRY" anywhere).
+
+Your `.env` and `config.json` stay untouched (they are gitignored). Only edit them with `nano` if you need to change PK/TG or factory addresses.
+
+See `VPS_UPDATE_COMMANDS.txt` in the repo for the full ready-to-paste block.
+
 ## GitHub / References (adapt from prompt)
 
 See the original prompt for a list of Pump.fun-like and EVM bot repos. Replace addresses and adapt ABIs.
