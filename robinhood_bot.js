@@ -251,6 +251,7 @@ async function initTelegram() {
  /bal - Balance
  /buy <amt> <addr> - Manual buy (with checks)
  /forcebuy <amt> <addr> - Force buy (bypass honeypot, 0 minOut)
+ /setfactory 0x... - Set factory at runtime (edit config.json for persist + restart)
  /help or /h - This help
 
 Use buttons for fast actions. New launches auto-post buy buttons.`;
@@ -290,6 +291,17 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
           await forceBuy(addr, amt);
         } else {
           await telegramBot.sendMessage(msg.chat.id, 'Usage: /forcebuy <amount> <address>');
+        }
+      } else if (text.startsWith('/setfactory ')) {
+        const newFactory = text.split(' ')[1];
+        if (newFactory && newFactory.startsWith('0x') && newFactory.length === 42) {
+          // Update runtime (note: for persistence edit config.json and restart)
+          // We can't easily reassign const, but for this session:
+          globalThis.FACTORY_OVERRIDE = newFactory; // used in poll if set
+          await sendTg(`Factory updated to ${newFactory} (runtime). For permanent: edit config.json and pm2 restart.`);
+          logger.info(`Factory set via TG to ${newFactory}`);
+        } else {
+          await telegramBot.sendMessage(msg.chat.id, 'Usage: /setfactory 0x... (42 char address)');
         }
       } else if (text === '/bal' || text === '/balance') {
         const bal = await getBalance();
@@ -762,8 +774,21 @@ async function isHoneypotOrBad(curveAddress) {
     const curve = new ethers.Contract(curveAddress, curveABI, provider);
     const testAmount = ethers.parseEther('0.001'); // smaller test for low balance wallets
 
-    // Simulate buy
-    const buyGas = await curve.buy.estimateGas(1n, wallet.address, { value: testAmount });
+    // Simulate buy - handle insufficient funds in estimate (common in sim)
+    let buyGas;
+    try {
+      buyGas = await curve.buy.estimateGas(1n, wallet.address, { value: testAmount });
+    } catch (e) {
+      if (e.message.includes('insufficient funds') || e.code === 'INSUFFICIENT_FUNDS') {
+        const bal = await getBalance();
+        if (bal >= testAmount * 2n) {
+          logger.info(`[HONEYPOT] Insufficient in estimate but wallet has enough (${ethers.formatEther(bal)} ETH) - allowing`);
+          return false;
+        }
+      }
+      logger.warn(`[HONEYPOT] Estimate failed for ${curveAddress}: ${e.message}`);
+      return true;
+    }
     if (buyGas > 800000n) {
       logger.warn(`[HONEYPOT] High buy gas ${buyGas} for ${curveAddress}`);
       return true;
@@ -1115,7 +1140,8 @@ async function pollNewLaunches() {
     const curveCompleteTopic = ethers.id('CurveCompleted(address,uint256,uint256)');
 
     // New launches - force broad scan if factory is placeholder
-    const useFactory = FACTORY && !FACTORY.includes('REPLACE') ? FACTORY : undefined;
+    const effectiveFactory = globalThis.FACTORY_OVERRIDE || FACTORY;
+    const useFactory = effectiveFactory && !effectiveFactory.includes('REPLACE') ? effectiveFactory : undefined;
     let logs = await withRetry(() => provider.getLogs({
       address: useFactory,
       fromBlock: lastPolledBlock + 1,
