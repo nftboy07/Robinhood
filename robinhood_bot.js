@@ -720,6 +720,15 @@ function loadPositions() {
         soldAmount: p.soldAmount ? BigInt(p.soldAmount) : 0n,
         reEntries: p.reEntries || 0
       }));
+      // Refresh names for unknown on load (mainnet)
+      positions.forEach(async (p, i) => {
+        if (p.symbol && p.symbol.includes('Unknown')) {
+          const info = await getTokenInfo(p.token);
+          if (info.name && !info.name.includes('Unknown')) {
+            p.symbol = `${info.name} (${info.symbol})`;
+          }
+        }
+      });
     }
   } catch (e) {}
 }
