@@ -159,6 +159,9 @@ let pendingCommands = [];
 // Recent launches for manual buy (stores last few detected)
 let recentLaunches = []; // [{addr, symbol, time}]
 
+// Map curve addr -> token addr for correct balance queries after buy
+let curveToToken = new Map();
+
 // ====================== TELEGRAM WITH BUTTONS (fun.noxa.fi/robinhood) ======================
 async function initTelegram() {
   if (!TG_TOKEN || !TG_CHAT || !ENABLE_TG) {
@@ -970,7 +973,7 @@ async function buyToken(curveAddress, amountStr) {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    let tokenForBal = curveAddress;
+    let tokenForBal = curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
     const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
     let minOut = 0n;
@@ -994,7 +997,7 @@ async function buyToken(curveAddress, amountStr) {
     // Use log parsing first for real received amount (curve vs token mismatch safe)
     const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
     const fromLog = rec.amount;
-    let actualToken = rec.token || curveAddress;
+    let actualToken = rec.token || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
     const balAfter = await getTokenBalance(actualToken, wallet.address);
     let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
     if (amount === 0n) {
@@ -1055,7 +1058,7 @@ async function forceBuy(curveAddress, amountStr) {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    let tokenForBal = curveAddress;
+    let tokenForBal = curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
     const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
     let minOut = 0n;
@@ -1078,7 +1081,7 @@ async function forceBuy(curveAddress, amountStr) {
 
     const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
     const fromLog = rec.amount;
-    let actualToken = rec.token || curveAddress;
+    let actualToken = rec.token || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
     const balAfter = await getTokenBalance(actualToken, wallet.address);
     let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
     if (amount === 0n) {
@@ -1506,7 +1509,7 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    let tokenForBal = tokenAddr || curveAddress;
+    let tokenForBal = tokenAddr || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
     const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
     const tx = await curve.buy(minOut, wallet.address, {
@@ -1522,7 +1525,7 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
 
     const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
     const fromLog = rec.amount;
-    let actualToken = rec.token || tokenAddr || curveAddress;
+    let actualToken = rec.token || tokenAddr || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
     const balAfter = await getTokenBalance(actualToken, wallet.address);
     let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : (estimated || 0n));
     if (amount === 0n) {
@@ -1854,6 +1857,7 @@ async function pollNewLaunches() {
           curveAddr = '0x' + log.topics[2].slice(-40);
         }
         logger.info(`[NEW LAUNCH] curve: ${curveAddr} (token: ${tokenAddr}) on fun.noxa.fi/robinhood`);
+        curveToToken.set(curveAddr.toLowerCase(), tokenAddr.toLowerCase());
         // Fire-and-forget alerts / menus so one slow TG doesn't block poll loop
         sendAlert(`🚀 New launch: ${curveAddr} on fun.noxa.fi/robinhood`).catch(()=>{});
         sendTg(`🚀 New launch detected: <code>${curveAddr}</code>`).catch(()=>{});
