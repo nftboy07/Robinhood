@@ -1410,10 +1410,25 @@ async function getTokenBalance(tokenAddr, owner) {
   } catch { return 0n; }
 }
 
+// Direct single-RPC provider for balance queries (avoids FallbackProvider network-changed errors)
+const directProvider = new ethers.JsonRpcProvider(
+  RPCS[0] || 'https://rpc.mainnet.chain.robinhood.com',
+  new ethers.Network('robinhood', 4663),
+  { staticNetwork: new ethers.Network('robinhood', 4663) }
+);
+
 async function getBalance() {
+  // Try FallbackProvider first, fall back to direct single RPC to avoid "network changed" returning 0
   try {
-    const bal = await provider.getBalance(wallet.address);
-    return bal;
+    const bal = await Promise.race([
+      provider.getBalance(wallet.address),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))
+    ]);
+    if (bal !== undefined && bal !== null) return bal;
+  } catch {}
+  // Direct fallback - always works
+  try {
+    return await directProvider.getBalance(wallet.address);
   } catch { return 0n; }
 }
 
