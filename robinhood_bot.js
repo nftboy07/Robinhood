@@ -54,8 +54,8 @@ if (argv.amount) config.snipeAmountEth = argv.amount;
 
 const RPC = config.rpc || 'https://rpc.mainnet.chain.robinhood.com';
 const PRIVATE_KEY = process.env.PK || '';
-const TG_TOKEN = process.env.TG_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '';
-const TG_CHAT = process.env.TG_CHAT_ID || process.env.TELEGRAM_CHAT_ID || '';
+const TG_TOKEN = process.env.TELEGRAM_TOKEN || process.env.BOT_TOKEN || process.env.TG_BOT_TOKEN || '';
+const TG_CHAT = process.env.ADMIN_CHAT_ID || process.env.TELEGRAM_CHAT_ID || process.env.TG_CHAT_ID || '';
 
 if (!PRIVATE_KEY || PRIVATE_KEY.includes('YOUR')) {
   console.error('Set PK in .env (use a dedicated small-balance wallet only)');
@@ -152,6 +152,12 @@ async function initTelegram() {
   }
   try {
     const TelegramBot = require('node-telegram-bot-api');
+    // ethbot style: ensure no webhook conflict for polling
+    const https = require('https');
+    const delWebhook = () => new Promise((resolve) => {
+      https.get(`https://api.telegram.org/bot${TG_TOKEN}/deleteWebhook?drop_pending_updates=true`, () => resolve()).on('error', () => resolve());
+    });
+    await delWebhook();
     telegramBot = new TelegramBot(TG_TOKEN, { polling: true });
 
     // Helper to send main menu with buttons - fast and usable
@@ -346,6 +352,28 @@ async function sendTg(text, options = {}) {
   } catch (e) {
     logger.debug('TG send failed: ' + e.message);
   }
+}
+
+// ethbot-style outbound alert (no polling needed, for workers/scripts)
+async function sendAlert(text) {
+  const token = TG_TOKEN;
+  const chatId = TG_CHAT;
+  if (!token || !chatId) return false;
+  try {
+    const https = require('https');
+    const data = JSON.stringify({ chat_id: chatId, text: text.slice(0, 4000) });
+    const options = {
+      hostname: 'api.telegram.org',
+      path: `/bot${token}/sendMessage`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': data.length }
+    };
+    const req = https.request(options, (res) => { /* ignore */ });
+    req.on('error', () => {});
+    req.write(data);
+    req.end();
+    return true;
+  } catch (e) { return false; }
 }
 
 // Helper to fetch real token name and symbol from the contract + Blockscout for nameless memes
