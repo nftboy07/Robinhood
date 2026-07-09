@@ -51,7 +51,12 @@ try {
 if (argv.amount) config.snipeAmountEth = argv.amount;
 
 const RPC = config.rpc || 'https://rpc.mainnet.chain.robinhood.com';
-const RPCS = (config.rpcs && Array.isArray(config.rpcs) && config.rpcs.length > 0) ? config.rpcs : [RPC];
+// Built-in list of known public / common RPCs for Robinhood Chain (add your own keys in config for production)
+const DEFAULT_RPCS = [
+  'https://rpc.mainnet.chain.robinhood.com'
+  // Add more here or in config.rpcs (Alchemy free tier, QuickNode, dRPC etc. recommended for avoiding rate limits)
+];
+const RPCS = (config.rpcs && Array.isArray(config.rpcs) && config.rpcs.length > 0) ? config.rpcs : DEFAULT_RPCS;
 const PRIVATE_KEY = process.env.PK || '';
 const TG_TOKEN = process.env.TELEGRAM_TOKEN || process.env.BOT_TOKEN || process.env.TG_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '';
 const TG_CHAT = process.env.ADMIN_CHAT_ID || process.env.TELEGRAM_CHAT_ID || process.env.TG_CHAT_ID || process.env.TELEGRAM_CHAT_ID || '';
