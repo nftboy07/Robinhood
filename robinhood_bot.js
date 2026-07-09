@@ -227,7 +227,7 @@ async function initTelegram() {
             [
               { text: '💰 Spent', callback_data: 'spent' },
               { text: '📊 Stats', callback_data: 'stats' },
-              { text: '🔄 Refresh', callback_data: 'refresh' }
+              { text: '📋 History', callback_data: 'history' }
             ],
             [
               { text: '⚙️ Config', callback_data: 'config' },
@@ -249,7 +249,7 @@ async function initTelegram() {
             ['/s', '/p', '/sa'],
             ['/r', '/poll', '/d'],
             ['/gas', '/pnl', '/holdings'],
-            ['/spent', '/received', '/stats'],
+            ['/spent', '/history', '/stats'],
             ['/config', '/block', '/last'],
             ['/refresh', '/check', '/snipe'],
             ['/sellmoon', '/clearpos', '/strategy'],
@@ -325,8 +325,9 @@ async function initTelegram() {
 /received - total est tokens
 /block - current block
 /last /lastlaunch - last detected launch
-/lastsells - recent sells info
-/stats - trades, pnl, block
+/history /trades - view recent trade history
+/clearhistory - clear your trade history
+/stats - view your realized trade statistics
 /config - full current config
 
 **Control:**
@@ -565,13 +566,44 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
           `Positions: ${positions.length} | Paused: ${isPaused}`;
         await telegramBot.sendMessage(msg.chat.id, cfgText);
       } else if (text === '/stats') {
-        const statsText = `📈 Stats (Mainnet):\n` +
-          `Daily trades: ${dailyStats.trades}\n` +
-          `Realized PnL: ${dailyStats.realizedPnl.toFixed(6)} ETH\n` +
-          `Positions: ${positions.length}\n` +
-          `Last block: ${await provider.getBlockNumber().catch(()=> '?')}\n` +
-          `Uptime: running`;
-        await telegramBot.sendMessage(msg.chat.id, statsText);
+        const block = await provider.getBlockNumber().catch(() => null);
+        const statsText = getStatsText(block);
+        await telegramBot.sendMessage(msg.chat.id, statsText, { parse_mode: 'HTML' });
+      } else if (text === '/history' || text === '/trades') {
+        try {
+          if (fs.existsSync(TRADES_HISTORY_FILE)) {
+            const history = JSON.parse(fs.readFileSync(TRADES_HISTORY_FILE, 'utf8'));
+            if (history && history.length > 0) {
+              let out = '📋 <b>Trade History (Last 10 trades)</b>\n\n';
+              const last10 = history.slice(-10).reverse();
+              last10.forEach((t, i) => {
+                const dateStr = new Date(t.timestamp).toLocaleTimeString();
+                const sign = t.pnlEth >= 0 ? '+' : '';
+                out += `${i+1}. <b>${t.symbol}</b> (${t.exitType})\n` +
+                       `   Amt: ${ethers.formatEther(BigInt(t.amount || '0'))}\n` +
+                       `   PnL: ${sign}${t.pnlEth.toFixed(6)} ETH (${sign}${t.pnlPct}%)\n` +
+                       `   Time: ${dateStr} | <a href="${EXPLORER}/tx/${t.txHash}">Tx</a>\n\n`;
+              });
+              await telegramBot.sendMessage(msg.chat.id, out, { parse_mode: 'HTML', disable_web_page_preview: true });
+            } else {
+              await telegramBot.sendMessage(msg.chat.id, 'No trade history found.');
+            }
+          } else {
+            await telegramBot.sendMessage(msg.chat.id, 'No trade history found.');
+          }
+        } catch (e) {
+          await telegramBot.sendMessage(msg.chat.id, 'Error loading history: ' + e.message);
+        }
+      } else if (text === '/clearhistory') {
+        try {
+          if (fs.existsSync(TRADES_HISTORY_FILE)) {
+            fs.unlinkSync(TRADES_HISTORY_FILE);
+          }
+          dailyStats.realizedPnl = 0;
+          await telegramBot.sendMessage(msg.chat.id, '✅ Trade history and realized PnL cleared.');
+        } catch (e) {
+          await telegramBot.sendMessage(msg.chat.id, 'Failed to clear history: ' + e.message);
+        }
       } else if (text.startsWith('/estimate ')) {
         const parts = text.split(' ');
         const addr = parts[1];
@@ -835,13 +867,35 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
         await handlePositions(chatId);
         await sendMainMenu(chatId);
       } else if (data === 'stats') {
-        const statsText = `📈 Stats (Mainnet):\n` +
-          `Daily trades: ${dailyStats.trades}\n` +
-          `Realized PnL: ${dailyStats.realizedPnl.toFixed(6)} ETH\n` +
-          `Positions: ${positions.length}\n` +
-          `Last block: ${await provider.getBlockNumber().catch(()=> '?')}\n` +
-          `Uptime: running`;
-        await telegramBot.sendMessage(chatId, statsText);
+        const block = await provider.getBlockNumber().catch(() => null);
+        const statsText = getStatsText(block);
+        await telegramBot.sendMessage(chatId, statsText, { parse_mode: 'HTML' });
+        await sendMainMenu(chatId);
+      } else if (data === 'history') {
+        try {
+          if (fs.existsSync(TRADES_HISTORY_FILE)) {
+            const history = JSON.parse(fs.readFileSync(TRADES_HISTORY_FILE, 'utf8'));
+            if (history && history.length > 0) {
+              let out = '📋 <b>Trade History (Last 10 trades)</b>\n\n';
+              const last10 = history.slice(-10).reverse();
+              last10.forEach((t, i) => {
+                const dateStr = new Date(t.timestamp).toLocaleTimeString();
+                const sign = t.pnlEth >= 0 ? '+' : '';
+                out += `${i+1}. <b>${t.symbol}</b> (${t.exitType})\n` +
+                       `   Amt: ${ethers.formatEther(BigInt(t.amount || '0'))}\n` +
+                       `   PnL: ${sign}${t.pnlEth.toFixed(6)} ETH (${sign}${t.pnlPct}%)\n` +
+                       `   Time: ${dateStr} | <a href="${EXPLORER}/tx/${t.txHash}">Tx</a>\n\n`;
+              });
+              await telegramBot.sendMessage(chatId, out, { parse_mode: 'HTML', disable_web_page_preview: true });
+            } else {
+              await telegramBot.sendMessage(chatId, 'No trade history found.');
+            }
+          } else {
+            await telegramBot.sendMessage(chatId, 'No trade history found.');
+          }
+        } catch (e) {
+          await telegramBot.sendMessage(chatId, 'Error loading history: ' + e.message);
+        }
         await sendMainMenu(chatId);
       } else if (data === 'config') {
         const bal = await getBalance();
@@ -1363,10 +1417,161 @@ async function estimateBuyOutput(curveAddress, ethAmount) {
   }
 }
 
+const TRADES_HISTORY_FILE = 'trades_history.json';
+
+// Fetch live price from either curve or DEX fallback
+async function getLivePrice(tokenAddress, curveAddress = null) {
+  const curve = curveAddress || tokenAddress;
+  try {
+    const curvePrice = await getCurrentPrice(curve);
+    if (curvePrice > 0n) return curvePrice;
+  } catch {}
+  
+  if (ROUTER && WETH) {
+    try {
+      const router = new ethers.Contract(ROUTER, routerABI, provider);
+      const oneToken = ethers.parseEther('1');
+      const amounts = await router.getAmountsOut(oneToken, [tokenAddress, WETH]);
+      if (amounts && amounts.length >= 2) {
+        return amounts[1];
+      }
+    } catch {}
+  }
+  return 0n;
+}
+
+// Log finalized trades to JSON file
+function logTradeToHistory(pos, sellAmount, exitPrice, txHash, exitType) {
+  try {
+    let history = [];
+    if (fs.existsSync(TRADES_HISTORY_FILE)) {
+      history = JSON.parse(fs.readFileSync(TRADES_HISTORY_FILE, 'utf8'));
+    }
+    
+    const entryPrice = pos.entryPrice || 0n;
+    const pnlPct = entryPrice > 0n ? (Number(exitPrice - entryPrice) / Number(entryPrice)) * 100 : 0;
+    const entryEth = entryPrice > 0n ? Number(ethers.formatEther(entryPrice)) * Number(ethers.formatEther(sellAmount)) : 0;
+    const exitEth = Number(ethers.formatEther(exitPrice)) * Number(ethers.formatEther(sellAmount));
+    const pnlEth = exitEth - entryEth;
+
+    const tradeRecord = {
+      token: pos.token || pos.curve,
+      symbol: pos.symbol || 'Unknown',
+      amount: sellAmount.toString(),
+      entryPrice: entryPrice.toString(),
+      exitPrice: exitPrice.toString(),
+      pnlPct: parseFloat(pnlPct.toFixed(2)),
+      pnlEth: parseFloat(pnlEth.toFixed(6)),
+      txHash: txHash || 'unknown',
+      exitType: exitType || 'MANUAL',
+      timestamp: Date.now()
+    };
+    
+    history.push(tradeRecord);
+    fs.writeFileSync(TRADES_HISTORY_FILE, JSON.stringify(history, null, 2));
+    dailyStats.realizedPnl += pnlEth;
+    logger.info(`[HISTORY LOGGED] ${pos.symbol} PnL: ${pnlEth.toFixed(6)} ETH (${pnlPct.toFixed(2)}%)`);
+  } catch (e) {
+    logger.error('Failed to log trade to history: ' + e.message);
+  }
+}
+
+// Get stats text dynamically from JSON
+function getStatsText(blockNumber) {
+  let totalRealizedPnl = dailyStats.realizedPnl;
+  let totalTrades = dailyStats.trades;
+  let wins = 0;
+  let losses = 0;
+  let winRate = 0;
+  
+  try {
+    if (fs.existsSync(TRADES_HISTORY_FILE)) {
+      const history = JSON.parse(fs.readFileSync(TRADES_HISTORY_FILE, 'utf8'));
+      if (history && history.length > 0) {
+        totalRealizedPnl = history.reduce((sum, t) => sum + (t.pnlEth || 0), 0);
+        totalTrades = history.length;
+        wins = history.filter(t => (t.pnlEth || 0) > 0).length;
+        losses = history.filter(t => (t.pnlEth || 0) <= 0).length;
+        winRate = (wins / totalTrades) * 100;
+      }
+    }
+  } catch (e) {
+    logger.error('Error loading stats from history: ' + e.message);
+  }
+
+  return `📈 <b>Real Realized Stats</b>\n` +
+    `Total realized PnL: ${totalRealizedPnl.toFixed(6)} ETH\n` +
+    `Realized trades: ${totalTrades} (${wins} wins / ${losses} losses)\n` +
+    `Win rate: ${winRate.toFixed(1)}%\n` +
+    `Daily trades count: ${dailyStats.trades}\n` +
+    `Current Positions: ${positions.length}\n` +
+    `Uptime: running\n` +
+    `Last block: ${blockNumber || '?'}`;
+}
+
+// Check holder distribution on Blockscout to screen rugs/whales
+async function checkHolderDistribution(tokenAddress, curveAddress) {
+  try {
+    const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/tokens/${tokenAddress}/holders`);
+    if (!res.ok) {
+      logger.debug(`[HOLDERS] Blockscout request failed for ${tokenAddress}: ${res.statusText}`);
+      return false; // don't block snipe if API is down
+    }
+    const data = await res.json();
+    if (!data || !data.items || !Array.isArray(data.items)) {
+      logger.debug(`[HOLDERS] Invalid response format for ${tokenAddress}`);
+      return false;
+    }
+
+    let totalCirculating = 0n;
+    let maxIndividualHolder = 0n;
+    const curveLower = curveAddress.toLowerCase();
+    const zeroAddr = '0x0000000000000000000000000000000000000000';
+
+    for (const item of data.items) {
+      const holderAddr = (item.address && item.address.hash || '').toLowerCase();
+      const val = BigInt(item.value || '0');
+      
+      // Skip curve/factory and zero address
+      if (holderAddr === curveLower || holderAddr === zeroAddr || (FACTORY && holderAddr === FACTORY.toLowerCase())) {
+        continue;
+      }
+      
+      totalCirculating += val;
+      if (val > maxIndividualHolder) {
+        maxIndividualHolder = val;
+      }
+    }
+
+    if (totalCirculating > 0n) {
+      const maxPct = Number(maxIndividualHolder * 100n / totalCirculating);
+      logger.info(`[HOLDERS] ${tokenAddress} - Max individual holder holds ${maxPct}% of circulating supply`);
+      if (maxPct > 50) {
+        logger.warn(`[HOLDERS] Whale concentration high: ${maxPct}%`);
+        return true;
+      }
+    }
+    return false;
+  } catch (e) {
+    logger.debug(`[HOLDERS] Error checking holders for ${tokenAddress}: ${e.message}`);
+    return false;
+  }
+}
+
 // Honeypot / rug check before snipe (simulate buy then sell)
-async function isHoneypotOrBad(curveAddress) {
+async function isHoneypotOrBad(curveAddress, tokenAddr = null) {
   if (!HONEYPOT_CHECK) return false;
   try {
+    // 1. Holder concentration check
+    const actualToken = tokenAddr || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
+    if (actualToken && actualToken !== '0x0000000000000000000000000000000000000000') {
+      const isConcentrated = await checkHolderDistribution(actualToken, curveAddress);
+      if (isConcentrated) {
+        logger.warn(`[HONEYPOT] Skip launch due to high holder concentration on ${actualToken}`);
+        return true;
+      }
+    }
+
     const curve = new ethers.Contract(curveAddress, curveABI, provider);
     const testAmount = ethers.parseEther('0.001'); // smaller test for low balance wallets
 
@@ -1437,17 +1642,41 @@ function checkRiskLimits() {
 async function sellOnDex(tokenAddress, tokenAmount) {
   if (!ROUTER || !WETH) {
     logger.warn('No ROUTER/WETH configured - cannot sell on DEX. Update config.json with real addresses.');
-    return;
+    return null;
   }
   try {
+    // 1. Approve router if needed
+    const erc20ABI = [
+      'function allowance(address owner, address spender) external view returns (uint256)',
+      'function approve(address spender, uint256 amount) external returns (bool)'
+    ];
+    const tokenContract = new ethers.Contract(tokenAddress, erc20ABI, wallet);
+    const allowance = await tokenContract.allowance(wallet.address, ROUTER).catch(() => 0n);
+    if (allowance < tokenAmount) {
+      logger.info(`Approving router to spend ${tokenAddress}...`);
+      await sendTg(`⚙️ Approving DEX router to spend ${tokenAddress}...`);
+      const approveTx = await tokenContract.approve(ROUTER, ethers.MaxUint256, { gasLimit: 100000 });
+      await approveTx.wait();
+      logger.info('Approval successful.');
+    }
+
     const router = new ethers.Contract(ROUTER, routerABI, wallet);
     const path = [tokenAddress, WETH];
     const deadline = Math.floor(Date.now() / 1000) + 300;
 
-    // Approve if needed (simplified)
-    // In production add ERC20 approve logic
+    // 2. Dynamic slippage check using getAmountsOut
+    let minOut = 0n;
+    try {
+      const amounts = await router.getAmountsOut(tokenAmount, path);
+      if (amounts && amounts.length >= 2) {
+        const expectedOut = amounts[1];
+        minOut = expectedOut * BigInt(100 - SLIPPAGE_PCT) / 100n;
+        logger.info(`DEX amountsOut expected: ${ethers.formatEther(expectedOut)} ETH | minOut (with slippage): ${ethers.formatEther(minOut)} ETH`);
+      }
+    } catch (e) {
+      logger.warn('Failed to estimate DEX amountsOut for slippage: ' + e.message);
+    }
 
-    const minOut = 0; // use slippage in real version
     const tx = await router.swapExactTokensForETHSupportingFeeOnTransferTokens(
       tokenAmount,
       minOut,
@@ -1456,11 +1685,15 @@ async function sellOnDex(tokenAddress, tokenAmount) {
       deadline,
       { gasLimit: 600000 }
     );
-    await tx.wait();
-    logger.info(`[DEX SELL] ${tokenAddress}`);
-    await sendTg('✅ Sold on DEX after graduation');
+    const receipt = await tx.wait();
+    const txHash = receipt.hash || receipt.transactionHash;
+    logger.info(`[DEX SELL] ${tokenAddress} tx: ${txHash}`);
+    await sendTg(`✅ Sold on DEX after graduation\nTx: <code>${txHash}</code>`);
+    return txHash;
   } catch (e) {
     logger.error('DEX sell failed: ' + e.message);
+    await sendTg(`❌ DEX sell failed: ${e.message.slice(0, 100)}`);
+    return null;
   }
 }
 
@@ -1484,7 +1717,7 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
   logger.info(`[SNIPE] ${sym} @ ${curveAddress} (token ${tokenAddr || curveAddress}) | ${ethers.formatEther(SNIPE_AMOUNT)} ETH (fun.noxa.fi)`);
 
   // Honeypot / bad curve check
-  if (await isHoneypotOrBad(curveAddress)) {
+  if (await isHoneypotOrBad(curveAddress, tokenAddr)) {
     logger.warn(`[SKIP] Possible honeypot or bad curve: ${curveAddress}`);
     await sendTg(`⚠️ Skipped suspicious launch: ${symbol}`);
     return;
@@ -1577,29 +1810,50 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
 }
 
 // ====================== SELL ======================
-async function sellPosition(pos) {
+async function sellPosition(pos, exitType = 'MANUAL') {
   // LIVE mainnet - always attempt real sell
-
-  // If migrated to DEX, use DEX sell
   const posCurve = pos.curve || pos.token;
   const posKey = pos.token || pos.curve;
+  const sellAmt = pos.amount;
+
   if (pos.isMigrated && ROUTER) {
-    await sellOnDex(posKey, pos.amount);
-    positions = positions.filter(p => (p.token || p.curve) !== posKey);
-    savePositions();
+    const exitPrice = await getLivePrice(posKey, posCurve);
+    const txHash = await sellOnDex(posKey, sellAmt);
+    if (txHash) {
+      logTradeToHistory(pos, sellAmt, exitPrice, txHash, exitType);
+      positions = positions.filter(p => (p.token || p.curve) !== posKey);
+      savePositions();
+    }
     return;
   }
 
   const curve = new ethers.Contract(posCurve, curveABI, wallet);
   try {
-    const tx = await curve.sell(pos.amount, 0n, { gasLimit: 550000 });
-    await tx.wait();
+    const exitPrice = await getLivePrice(posKey, posCurve);
+    const tx = await curve.sell(sellAmt, 0n, { gasLimit: 550000 });
+    const receipt = await tx.wait();
+    const txHash = receipt.hash || receipt.transactionHash;
     logger.info(`[SOLD] ${pos.symbol}`);
     await sendTg(`💰 Sold <b>${pos.symbol}</b>`);
+    
+    logTradeToHistory(pos, sellAmt, exitPrice, txHash, exitType);
+    
     const key = pos.token || pos.curve; positions = positions.filter(p => (p.token || p.curve) !== key);
     savePositions();
   } catch (e) {
-    logger.error(`Sell error: ${e.message}`);
+    logger.error(`Sell error on curve: ${e.message}. Attempting DEX fallback...`);
+    if (ROUTER) {
+      pos.isMigrated = true;
+      const exitPrice = await getLivePrice(posKey, posCurve);
+      const txHash = await sellOnDex(posKey, sellAmt);
+      if (txHash) {
+        logTradeToHistory(pos, sellAmt, exitPrice, txHash, exitType);
+        const key = pos.token || pos.curve; positions = positions.filter(p => (p.token || p.curve) !== key);
+        savePositions();
+      }
+    } else {
+      await sendTg(`❌ Sell failed for ${pos.symbol}: ${e.message}`);
+    }
   }
 }
 
@@ -1710,8 +1964,7 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
   if (pnlPct <= -STOP_LOSS * 100) {
     logger.info(`[SL] ${pos.symbol} PnL ${pnlPct.toFixed(1)}% - Selling for capital protection`);
     await sendTg(`🛡️ SL hit on ${pos.symbol} (${pnlPct.toFixed(1)}%) - Protecting capital`);
-    await sellPosition(pos);
-    dailyStats.realizedPnl += (currentPrice - pos.entryPrice) * (remainingAmount / BigInt(10**18)) / BigInt(10**18) || 0;
+    await sellPosition(pos, 'STOP_LOSS');
     return;
   }
 
@@ -1734,13 +1987,12 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
         await sendTg(`💰 TP${i+1} hit on ${pos.symbol} (${(target*100).toFixed(0)}% gain) - Selling ${sellPct}% , moonbag kept`);
         
         const tempPos = {...pos, amount: sellAmount};
-        await sellPosition(tempPos);
+        await sellPosition(tempPos, 'TAKE_PROFIT');
         
         pos.soldAmount = (pos.soldAmount || 0n) + sellAmount;
         pos.tpReached = pos.tpReached || [];
         pos.tpReached.push(i);
         
-        dailyStats.realizedPnl += (currentPrice - pos.entryPrice) * (sellAmount / BigInt(10**18)) / BigInt(10**18) || 0;
         savePositions();
         remainingAmount = pos.amount - (pos.soldAmount || 0n);
       }
@@ -1754,7 +2006,7 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
       logger.info(`[TRAILING] ${pos.symbol} dropped below peak - Selling to moonbag`);
       await sendTg(`📉 Trailing stop on ${pos.symbol} - Selling to ${moonbagPct}% moonbag`);
       const tempPos = {...pos, amount: sellAmount};
-      await sellPosition(tempPos);
+      await sellPosition(tempPos, 'TRAILING_STOP');
       pos.soldAmount = (pos.soldAmount || 0n) + sellAmount;
       savePositions();
     }
