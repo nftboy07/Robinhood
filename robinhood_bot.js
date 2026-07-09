@@ -456,27 +456,29 @@ async function sendAlert(text) {
 async function getTokenInfo(addr) {
   let name = "Unknown Token";
   let symbol = "???";
+  // Always try Blockscout first for reliable names (especially if addr is curve or token)
+  try {
+    const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${addr}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.name) name = data.name;
+      if (data.symbol) symbol = data.symbol;
+    }
+  } catch (e) {}
+  // Then try on-chain ERC20 if better
   try {
     const erc20Abi = [
       "function name() view returns (string)",
       "function symbol() view returns (string)"
     ];
     const token = new ethers.Contract(addr, erc20Abi, provider);
-    [name, symbol] = await Promise.all([
+    const [onName, onSym] = await Promise.all([
       token.name().catch(() => name),
       token.symbol().catch(() => symbol)
     ]);
+    if (onName && onName !== "Unknown Token") name = onName;
+    if (onSym && onSym !== "???") symbol = onSym;
   } catch {}
-  // Fallback: query Blockscout API for indexed name/creator/tx for nameless tokens
-  try {
-    const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${addr}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data.name && data.name !== name) name = data.name;
-      if (data.symbol && data.symbol !== symbol) symbol = data.symbol;
-      // Can add creator: data.creator?.hash or creation tx
-    }
-  } catch (e) {}
   return { name, symbol };
 }
 
