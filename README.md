@@ -165,6 +165,56 @@ node discover.js
 node robinhood_bot.js
 ```
 
+## Telegram Setup (ethbot style - clean & proven)
+
+1. Create bot:
+   - Open Telegram → @BotFather
+   - /newbot → name + username (ends in bot)
+   - Copy TELEGRAM_TOKEN (e.g. 123456789:ABCdef...)
+
+2. Get ADMIN_CHAT_ID:
+   - DM your bot (send "hi")
+   - Browser: https://api.telegram.org/bot<TOKEN>/getUpdates
+   - Find "chat":{"id": YOUR_ID}
+
+3. .env (minimum):
+   ```
+   TELEGRAM_TOKEN=your_token
+   ADMIN_CHAT_ID=your_id
+   PK=0x...
+   ```
+
+   Aliases supported: BOT_TOKEN, TELEGRAM_CHAT_ID.
+
+4. Test:
+   ```
+   node tg_diag.js
+   ```
+
+See tg_diag.js and sendAlert() in code for outbound alerts.
+For full interactive (buttons/commands): polling bot is running.
+```
+
+## Telegram Commands (fast & usable)
+
+Send `/menu` or `/start` for button menu + persistent quick keyboard.
+
+**Short commands:**
+- `/m` or `/menu`
+- `/s` or `/status`
+- `/p` or `/positions`
+- `/sa` or `/sellall`
+- `/r` or `/recent`
+- `/poll`
+- `/h` or `/help`
+
+**Buttons (fast menu):**
+- Status, Positions, Sell All, Poll Now, Recent, Test Buy, Config, Stop
+
+New launches auto-post with token name + buy buttons (0.003 / 0.005 / 0.007 / 0.01 ETH).
+
+Use `/menu` in your TG bot to see everything.
+
 ## Telegram Bot Commands & Buttons
 
 The bot has a full Telegram interface (send `/menu` or `/start` to your bot to open it).
