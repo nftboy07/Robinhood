@@ -27,7 +27,7 @@
 - Max daily loss 5% (stops sniping).
 - Max 20 trades/hour.
 - Max re-entries limited.
-- Always start in dryRun: true. Test thoroughly.
+- **LIVE MAINNET ONLY** (no dry-run). You are experienced, use tiny entries on mainnet only.
 
 **Automation**:
 - Runs 24/7 via PM2 on VPS.
@@ -65,9 +65,7 @@ This is the complete upgraded version for the NOXA Fun bonding curve launchpad o
 - CLI flags + robust RPC handling
 - PM2 ready for VPS
 - Honeypot checks, daily loss limits, max trades per hour
-- **Automatic safe strategy**: 0.0001 ETH snipes, TP ladder + trailing, re-entries on dips, capital protection SL
-
-**⚠️ WARNING** — Only use with money you can afford to lose. Always start in dry-run.
+- **Automatic safe strategy**: 0.0001 ETH snipes, TP ladder + trailing, re-entries on dips, capital protection SL (LIVE MAINNET)
 
 This is a full vertical solution for:
 - Monitoring new token launches on the bonding-curve style launchpad
@@ -161,7 +159,7 @@ copy config.json.example config.json
 # 5. (Optional) Run discovery
 node discover.js
 
-# 6. Run bot (dry run first!)
+# 6. Run bot (LIVE MAINNET ONLY - experienced)
 node robinhood_bot.js
 ```
 
@@ -221,7 +219,7 @@ The bot has a full Telegram interface (send `/menu` or `/start` to your bot to o
 
 **Text commands:**
 - `/menu` or `/start` — Open the main button menu
-- `/status` — Show current positions, PnL, balance, dryRun state
+- `/status` — Show current positions, PnL, balance, mode (LIVE)
 - `/positions` — List open positions (with per-position Sell buttons)
 - `/help` — List commands
 
@@ -264,7 +262,6 @@ See `config.json.example`. Key fields:
 - `stopLossPct`, `takeProfitPct`, `trailingStopPct`
 - `maxConcurrentPositions`
 - `pollIntervalMs` (recommend 800-1500 for speed)
-- `dryRun`: true  (simulates, no real txs)
 - `gasMultiplier`
 
 ## Features Implemented
@@ -277,7 +274,7 @@ See `config.json.example`. Key fields:
 - Persistent positions across restarts
 - Heartbeat + structured logging (winston)
 - Basic bundle fallback stub (note: may not be supported)
-- Safety limits and dry-run mode
+- Safety limits (LIVE mainnet mode)
 
 ## Production Tips for 4663
 

@@ -16,10 +16,10 @@
  * - Ready for real trading (you will add PK + TG)
  *
  * Usage:
- *   node robinhood_bot.js --dry-run
- *   node robinhood_bot.js --amount 0.1
+ *   node robinhood_bot.js --amount 0.0001
+ *   node robinhood_bot.js --config custom.json
  *
- * After you add .env with real PK + TG, remove --dry-run
+ * LIVE MAINNET ONLY - no dry-run. Experienced user mode. Small fixed entries.
  */
 
 require('dotenv').config();
@@ -32,8 +32,7 @@ const { hideBin } = require('yargs/helpers');
 
 // ====================== CLI ======================
 const argv = yargs(hideBin(process.argv))
-  .option('dry-run', { type: 'boolean', default: undefined, describe: 'Force dry run mode' })
-  .option('amount', { type: 'string', describe: 'Snipe amount in ETH' })
+  .option('amount', { type: 'string', describe: 'Snipe amount in ETH (overrides config)' })
   .option('config', { type: 'string', default: 'config.json', describe: 'Config file' })
   .help()
   .argv;
@@ -48,8 +47,7 @@ try {
   process.exit(1);
 }
 
-// Override from CLI
-if (argv['dry-run'] !== undefined) config.dryRun = argv['dry-run'];
+// Override from CLI (amount only - live mainnet always)
 if (argv.amount) config.snipeAmountEth = argv.amount;
 
 const RPC = config.rpc || 'https://rpc.mainnet.chain.robinhood.com';
@@ -76,7 +74,6 @@ const TAKE_PROFIT = config.takeProfitPct ?? 0.60;
 const TRAILING = config.trailingStopPct ?? 0.08;
 const POLL_MS = config.pollIntervalMs || 1100;
 const GAS_MULT = config.gasMultiplier || 1.8;
-const DRY_RUN = !!config.dryRun;
 const MAX_POS = config.maxConcurrentPositions || 8;
 const POSITIONS_FILE = config.positionsFile || 'positions.json';
 
@@ -87,7 +84,7 @@ const MAX_TRADES_PER_HOUR = config.maxTradesPerHour ?? 12;
 const SLIPPAGE_PCT = config.slippagePct ?? 15;
 const ENABLE_TG = config.enableTelegram !== false;
 
-// Strategy config (safe small amount sniping)
+// Strategy config (safe small amount sniping) - LIVE MAINNET
 const STRATEGY = config.strategy || {
   tpLadder: [0.5, 1.0, 2.0],
   tpSellPercents: [30, 30, 40],
@@ -98,7 +95,7 @@ const STRATEGY = config.strategy || {
   moonbagPct: 25
 };
 
-const SNIPE_AMOUNT = ethers.parseEther('0.0001'); // forced small for safe meme sniping strategy
+const SNIPE_AMOUNT = ethers.parseEther('0.0001'); // fixed tiny entry - mainnet live
 
 // ====================== PROVIDER & WALLET ======================
 // Custom chain 4663 - static network to avoid ENS lookups and errors
@@ -325,7 +322,7 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
         await sendMainMenu(chatId);
       } else if (data === 'config') {
         const cfgText = `⚙️ Current Config:\n` +
-          `dryRun: ${DRY_RUN}\n` +
+          `Mode: LIVE MAINNET ONLY\n` +
           `Snipe: ${ethers.formatEther(SNIPE_AMOUNT)} ETH\n` +
           `SL: ${STOP_LOSS * 100}%\n` +
           `TP: ${TAKE_PROFIT * 100}%\n` +
@@ -474,11 +471,6 @@ async function buyToken(curveAddress, amountStr) {
   const buyAmount = ethers.parseEther(amountStr);
   logger.info(`[MANUAL BUY] ${curveAddress} for ${amountStr} ETH`);
 
-  if (DRY_RUN) {
-    await sendTg(`🟡 DRY RUN: Would buy ${amountStr} on ${curveAddress}`);
-    return;
-  }
-
   const curve = new ethers.Contract(curveAddress, curveABI, wallet);
   try {
     const gasEst = await curve.buy.estimateGas(0n, wallet.address, { value: buyAmount });
@@ -534,7 +526,7 @@ async function handleStatus(chatId) {
   const moonbag = STRATEGY.moonbagPct || 25;
   const bal = await getBalance();
   const balEth = ethers.formatEther(bal);
-  const text = `📊 <b>Status</b>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nBalance: ${balEth} ETH\nDryRun: ${DRY_RUN}\nMoonbag: ${moonbag}% held`;
+  const text = `📊 <b>Status</b>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nBalance: ${balEth} ETH\nMode: LIVE MAINNET\nMoonbag: ${moonbag}% held`;
   await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML' });
 }
 
@@ -683,8 +675,8 @@ function checkRiskLimits() {
 
 // Sell on DEX (Uniswap V2 style) after migration
 async function sellOnDex(tokenAddress, tokenAmount) {
-  if (!ROUTER || !WETH || DRY_RUN) {
-    logger.info('[DRY] Would sell on DEX');
+  if (!ROUTER || !WETH) {
+    logger.warn('No ROUTER/WETH configured - cannot sell on DEX. Update config.json with real addresses.');
     return;
   }
   try {
@@ -741,20 +733,6 @@ async function snipe(curveAddress, symbol) {
   const estimated = await estimateBuyOutput(curveAddress, SNIPE_AMOUNT);
   logger.info(`Estimated tokens for buy: ${ethers.formatEther(estimated || 0n)}`);
 
-  if (DRY_RUN) {
-    await sendTg(`🟡 DRY RUN: Would snipe <b>${symbol}</b> on fun.noxa.fi/robinhood`);
-    positions.push({
-      token: curveAddress, symbol,
-      amount: estimated || ethers.parseEther('1000000'),
-      entryPrice: await getCurrentPrice(curveAddress) || 1000000000000n,
-      highestPrice: 1000000000000n,
-      isMigrated: false, entryBlock: 0
-    });
-    dailyStats.trades++;
-    savePositions();
-    return;
-  }
-
   const curve = new ethers.Contract(curveAddress, curveABI, wallet);
 
   try {
@@ -808,12 +786,7 @@ async function snipe(curveAddress, symbol) {
 
 // ====================== SELL ======================
 async function sellPosition(pos) {
-  if (DRY_RUN) {
-    logger.info(`[DRY] Would sell ${pos.symbol}`);
-    positions = positions.filter(p => p.token !== pos.token);
-    savePositions();
-    return;
-  }
+  // LIVE mainnet - always attempt real sell
 
   // If migrated to DEX, use DEX sell
   if (pos.isMigrated && ROUTER) {
@@ -1072,9 +1045,9 @@ async function pollNewLaunches() {
 
 // ====================== MAIN ======================
 async function main() {
-  console.log('=== ROBINHOOD CHAIN SNIPER - fun.noxa.fi/robinhood (FULL UPGRADE) ===');
+  console.log('=== ROBINHOOD CHAIN SNIPER - fun.noxa.fi/robinhood (LIVE MAINNET) ===');
   logger.info(`Wallet: ${wallet.address}`);
-  logger.info(`DRY RUN: ${DRY_RUN}`);
+  logger.info(`Mode: LIVE MAINNET ONLY (experienced user)`);
   logger.info(`Snipe size: ${ethers.formatEther(SNIPE_AMOUNT)} ETH`);
   logger.info(`Focus: fun.noxa.fi/robinhood bonding curves`);
 

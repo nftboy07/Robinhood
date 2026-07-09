@@ -92,7 +92,7 @@ async function findRecentLaunches() {
   console.log('3. Use browser DevTools on fun.noxa.fi/robinhood (Network tab) while creating/buying a token.');
   console.log('4. Paste the "to" address of the main tx into config.json as "factory".');
   console.log('5. For WETH/Router: find any graduated token on the site and inspect its pair.');
-  console.log('\nOnce you have addresses, update config.json and set dryRun: true');
+  console.log('\nOnce you have addresses, update config.json (factory/weth/router) and run the LIVE bot on mainnet.');
 }
 
 findRecentLaunches().catch(console.error);

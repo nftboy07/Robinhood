@@ -7,7 +7,7 @@
     "start": "node robinhood_bot.js",
     "discover": "node discover.js",
     "setup": "node setup.js",
-    "test": "echo \"No tests - use small amounts and dryRun mode\""
+    "test": "echo \"No unit tests - live mainnet with tiny 0.0001 ETH entries only. Monitor via TG and explorer.\""
   },
   "keywords": ["robinhood", "chain", "4663", "noxa", "sniper", "evm", "pump", "bonding-curve"],
   "author": "",
