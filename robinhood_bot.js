@@ -490,7 +490,7 @@ async function buyToken(curveAddress, amountStr) {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    const tx = await curve.buy(0n, wallet.address, {
+    const tx = await curve.buy(1n, wallet.address, {
       value: buyAmount,
       gasLimit: gasEst * 140n / 100n,
       maxFeePerGas: maxFee,
@@ -679,16 +679,22 @@ async function isHoneypotOrBad(curveAddress) {
     const testAmount = ethers.parseEther('0.01');
 
     // Simulate buy
-    const buyGas = await curve.buy.estimateGas(0, wallet.address, { value: testAmount });
-    if (buyGas > 500000n) return true; // suspicious high gas
+    const buyGas = await curve.buy.estimateGas(1n, wallet.address, { value: testAmount });
+    if (buyGas > 800000n) {
+      logger.warn(`[HONEYPOT] High buy gas ${buyGas} for ${curveAddress}`);
+      return true;
+    }
 
     // Try to simulate sell (if we had tokens)
-    // For real check, we would need to buy small amount on test, but for speed we check sell function exists and basic
-    const sellGas = await curve.sell.estimateGas(1000n, 0).catch(() => 999999n);
-    if (sellGas > 800000n) return true;
+    const sellGas = await curve.sell.estimateGas(1000n, 1n).catch(() => 999999n);
+    if (sellGas > 1000000n) {
+      logger.warn(`[HONEYPOT] High sell gas ${sellGas} for ${curveAddress}`);
+      return true;
+    }
 
     return false;
-  } catch {
+  } catch (e) {
+    logger.warn(`[HONEYPOT] Estimate failed for ${curveAddress}: ${e.message}`);
     return true; // if can't even estimate, risky
   }
 }
@@ -795,7 +801,7 @@ async function snipe(curveAddress, symbol) {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    const tx = await curve.buy(0n, wallet.address, {
+    const tx = await curve.buy(1n, wallet.address, {
       value: SNIPE_AMOUNT,
       gasLimit: gasEst * 145n / 100n,
       maxFeePerGas: maxFee,
