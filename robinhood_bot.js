@@ -613,17 +613,14 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
         await telegramBot.sendMessage(msg.chat.id, `📊 <b>PnL (Mainnet)</b>\nPositions: ${positions.length}\nUnrealized PnL: ~${totalUnreal.toFixed(6)} ETH\nEst Total Spent: ~${totalSpent.toFixed(4)} ETH\nCurrent Bal: ${ethers.formatEther(bal)} ETH\n(Realized tracked in dailyStats)${note}`);
       } else if (text === '/holdings' || text === '/tokens') {
         let out = '🪙 <b>Holdings (Mainnet)</b>\n';
-        const addrs = [...new Set(positions.map(p => p.token).concat(recentLaunches.map(l => l.addr)))];
+        const addrs = [...new Set(positions.map(p => p.token || p.curve).concat(recentLaunches.map(l => l.addr)))];
         for (const a of addrs.slice(0,8)) {
           try {
-            const erc = new ethers.Contract(a, ["function balanceOf(address) view returns (uint256)","function symbol() view returns (string)"], provider);
-            const b = await erc.balanceOf(wallet.address);
-            let sym = '???';
-            try { sym = await erc.symbol(); } catch { 
-              const info = await getTokenInfo(a); sym = info.symbol || '???'; 
-            }
-            out += `${sym}: ${ethers.formatEther(b)} @ <code>${a}</code>\n`;
-          } catch (e) { out += `Addr ${a}: query failed\n`; }
+            const bal = await getTokenBalance(a, wallet.address);
+            const info = await getTokenInfo(a);
+            const sym = (info.symbol && info.symbol !== '???') ? info.symbol : 'Token';
+            out += `${sym}: ${ethers.formatEther(bal)} @ <code>${a}</code>\n`;
+          } catch (e) { out += `Addr ${a}: ${e.message ? e.message.slice(0,30) : 'query issue'}\n`; }
         }
         out += `Native: ${ethers.formatEther(await getBalance())} ETH\n<a href="${EXPLORER}/address/${wallet.address}">Wallet</a>`;
         await telegramBot.sendMessage(msg.chat.id, out);
@@ -793,17 +790,14 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
         await sendMainMenu(chatId);
       } else if (data === 'holdings' || data === 'tokens') {
         let out = '🪙 <b>Holdings (Mainnet)</b>\n';
-        const addrs = [...new Set(positions.map(p => p.token).concat(recentLaunches.map(l => l.addr)))];
+        const addrs = [...new Set(positions.map(p => p.token || p.curve).concat(recentLaunches.map(l => l.addr)))];
         for (const a of addrs.slice(0,8)) {
           try {
-            const erc = new ethers.Contract(a, ["function balanceOf(address) view returns (uint256)","function symbol() view returns (string)"], provider);
-            const b = await erc.balanceOf(wallet.address);
-            let sym = '???';
-            try { sym = await erc.symbol(); } catch { 
-              const info = await getTokenInfo(a); sym = info.symbol || '???'; 
-            }
-            out += `${sym}: ${ethers.formatEther(b)} @ <code>${a}</code>\n`;
-          } catch (e) { out += `Addr ${a}: query failed\n`; }
+            const bal = await getTokenBalance(a, wallet.address);
+            const info = await getTokenInfo(a);
+            const sym = (info.symbol && info.symbol !== '???') ? info.symbol : 'Token';
+            out += `${sym}: ${ethers.formatEther(bal)} @ <code>${a}</code>\n`;
+          } catch (e) { out += `Addr ${a}: ${e.message ? e.message.slice(0,30) : 'query issue'}\n`; }
         }
         out += `Native: ${ethers.formatEther(await getBalance())} ETH\n<a href="${EXPLORER}/address/${wallet.address}">Wallet</a>`;
         await telegramBot.sendMessage(chatId, out);
@@ -994,8 +988,10 @@ async function buyToken(curveAddress, amountStr) {
     const txLink = `${EXPLORER}/tx/${txHash}`;
 
     // Use log parsing first for real received amount (curve vs token mismatch safe)
-    const fromLog = await getReceivedAmountFromReceipt(receipt, wallet.address);
-    const balAfter = await getTokenBalance(curveAddress, wallet.address);
+    const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
+    const fromLog = rec.amount;
+    const actualToken = rec.token || curveAddress;
+    const balAfter = await getTokenBalance(actualToken, wallet.address);
     let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
     if (amount === 0n) {
       logger.warn(`[BUY] No tokens received for ${curveAddress}`);
@@ -1020,7 +1016,7 @@ async function buyToken(curveAddress, amountStr) {
     } else {
       positions.push({
         curve: curveAddress,
-        token: curveAddress,
+        token: actualToken,
         symbol: `${info.name} (${info.symbol})`,
         amount,
         entryPrice,
@@ -1068,8 +1064,10 @@ async function forceBuy(curveAddress, amountStr) {
     const txHash = receipt.hash || receipt.transactionHash || 'unknown';
     const txLink = `${EXPLORER}/tx/${txHash}`;
 
-    const fromLog = await getReceivedAmountFromReceipt(receipt, wallet.address);
-    const balAfter = await getTokenBalance(curveAddress, wallet.address);
+    const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
+    const fromLog = rec.amount;
+    const actualToken = rec.token || curveAddress;
+    const balAfter = await getTokenBalance(actualToken, wallet.address);
     let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
     if (amount === 0n) {
       logger.warn(`[FORCE BUY] No tokens received for ${curveAddress}`);
@@ -1092,7 +1090,7 @@ async function forceBuy(curveAddress, amountStr) {
     } else {
       positions.push({
         curve: curveAddress,
-        token: curveAddress,
+        token: actualToken,
         symbol: `${info.name} (${info.symbol})`,
         amount,
         entryPrice,
@@ -1286,11 +1284,12 @@ async function getBalance() {
 // Reliable received token amount extractor from tx receipt logs (Transfer or Trade events)
 // This fixes "no tokens received" even when balanceOf is queried on curve vs actual ERC20 token
 async function getReceivedAmountFromReceipt(receipt, owner) {
-  if (!receipt || !receipt.logs) return 0n;
+  if (!receipt || !receipt.logs) return { amount: 0n, token: null };
   const ownerLower = owner.toLowerCase();
   const transferTopic = ethers.id('Transfer(address,address,uint256)');
   const tradeTopic = ethers.id('Trade(address,bool,uint256,uint256)');
   let received = 0n;
+  let token = null;
   for (const log of receipt.logs) {
     try {
       if (!log.topics || !log.topics[0]) continue;
@@ -1299,21 +1298,26 @@ async function getReceivedAmountFromReceipt(receipt, owner) {
         const to = '0x' + log.topics[2].slice(-40);
         if (to.toLowerCase() === ownerLower) {
           const val = BigInt(log.data || '0x0');
-          if (val > 0n) received = val;
+          if (val > 0n) {
+            received = val;
+            token = log.address;  // The ERC20 token contract that emitted the Transfer
+          }
         }
       }
-      if (topic0 === tradeTopic) {
+      if (topic0 === tradeTopic && received === 0n) {
         // Trade(trader, isBuy, ethAmount, tokenAmount) - tokenAmount is last 32 bytes of data
         const data = (log.data || '').replace('0x', '');
         if (data.length >= 64) {
           const tokenAmtHex = '0x' + data.slice(-64);
           const amt = BigInt(tokenAmtHex);
           if (amt > 0n) received = amt;
+          // token may be in log.address or need other logic; fallback later
+          if (!token) token = log.address;
         }
       }
     } catch {}
   }
-  return received;
+  return { amount: received, token };
 }
 
 // ====================== NEW UPGRADES: Curve math, Honeypot, DEX sell, Risk ======================
@@ -1495,10 +1499,12 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
 
     const receipt = await withTimeout(tx.wait(), 120000, 'snipe tx.wait');
     const txHash = receipt.hash || receipt.transactionHash || 'unknown';
-    logger.info(`[BOUGHT] ${symbol} tx: ${txHash}`);
+    logger.info(`[BOUGHT] ${sym} tx: ${txHash}`);
 
-    const fromLog = await getReceivedAmountFromReceipt(receipt, wallet.address);
-    const balAfter = await getTokenBalance(curveAddress, wallet.address);
+    const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
+    const fromLog = rec.amount;
+    const actualToken = rec.token || curveAddress;
+    const balAfter = await getTokenBalance(actualToken, wallet.address);
     let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : (estimated || 0n));
     if (amount === 0n) {
       logger.warn(`[SNIPE] No tokens received for ${curveAddress}`);
@@ -1511,11 +1517,11 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
     }
     const info = await getTokenInfo(curveAddress);
 
-    const storedToken = tokenAddr || curveAddress;
+    const storedToken = actualToken || tokenAddr || curveAddress;
     positions.push({ 
       curve: curveAddress,
       token: storedToken, 
-      symbol: symbol || `${info.name} (${info.symbol})`, 
+      symbol: sym || `${info.name} (${info.symbol})`, 
       amount, 
       entryPrice, 
       highestPrice: entryPrice, 
