@@ -1006,7 +1006,7 @@ async function buyToken(curveAddress, amountStr) {
     }
     if (amount === 0n) {
       logger.warn(`[BUY] No tokens received for ${curveAddress}`);
-      await sendTg(`⚠️ Buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
+      await sendTg(`⚠️ Buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue. <a href="${txLink}">Check tx</a>`);
       return;
     }
 
@@ -1089,7 +1089,7 @@ async function forceBuy(curveAddress, amountStr) {
     }
     if (amount === 0n) {
       logger.warn(`[FORCE BUY] No tokens received for ${curveAddress}`);
-      await sendTg(`⚠️ Force buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
+      await sendTg(`⚠️ Force buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue. <a href="${txLink}">Check tx</a>`);
       return;
     }
     let entryPrice = await getCurrentPrice(curveAddress);
@@ -1533,7 +1533,7 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
     }
     if (amount === 0n) {
       logger.warn(`[SNIPE] No tokens received for ${curveAddress}`);
-      await sendTg(`⚠️ Snipe tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
+      await sendTg(`⚠️ Snipe tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue. <a href="${txLink}">Check tx</a>`);
       return;
     }
     let entryPrice = await getCurrentPrice(curveAddress);
