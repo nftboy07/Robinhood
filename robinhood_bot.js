@@ -537,10 +537,11 @@ async function buyToken(curveAddress, amountStr) {
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
     const receipt = await tx.wait();
-    const txLink = `${EXPLORER}/tx/${receipt.transactionHash}`;
-    logger.info(`[BOUGHT] tx: ${receipt.transactionHash}`);
-    await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${receipt.transactionHash}\n${txLink}`);
-    await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${receipt.transactionHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
+    const txHash = receipt.hash || receipt.transactionHash || 'unknown';
+    const txLink = `${EXPLORER}/tx/${txHash}`;
+    logger.info(`[BOUGHT] tx: ${txHash}`);
+    await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
+    await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
 
     // Add to positions (simplified)
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
@@ -592,10 +593,11 @@ async function forceBuy(curveAddress, amountStr) {
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
     const receipt = await tx.wait();
-    const txLink = `${EXPLORER}/tx/${receipt.transactionHash}`;
-    logger.info(`[FORCE BOUGHT] tx: ${receipt.transactionHash}`);
-    await sendAlert(`✅ Force Bought ${amountStr} ETH on ${curveAddress}\nTx: ${receipt.transactionHash}\n${txLink}`);
-    await sendTg(`✅ Force Bought ${amountStr} ETH worth\nTx: <code>${receipt.transactionHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
+    const txHash = receipt.hash || receipt.transactionHash || 'unknown';
+    const txLink = `${EXPLORER}/tx/${txHash}`;
+    logger.info(`[FORCE BOUGHT] tx: ${txHash}`);
+    await sendAlert(`✅ Force Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
+    await sendTg(`✅ Force Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
 
     // Add to positions
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
@@ -925,7 +927,8 @@ async function snipe(curveAddress, symbol) {
     });
 
     const receipt = await tx.wait();
-    logger.info(`[BOUGHT] ${symbol} tx: ${receipt.transactionHash}`);
+    const txHash = receipt.hash || receipt.transactionHash || 'unknown';
+    logger.info(`[BOUGHT] ${symbol} tx: ${txHash}`);
 
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const log = receipt.logs.find(l => l.topics[0] === transferTopic);
@@ -948,7 +951,7 @@ async function snipe(curveAddress, symbol) {
     dailyStats.trades++;
     savePositions();
 
-    const txLink = `${EXPLORER}/tx/${receipt.transactionHash}`;
+    const txLink = `${EXPLORER}/tx/${txHash}`;
     await sendTg(`✅ Bought <b>${symbol}</b> on fun.noxa.fi/robinhood\nEst. amount: ${ethers.formatEther(amount)}\n<a href="${txLink}">View tx</a>`);
     await sendAlert(`✅ Snipe bought ${symbol}\n${txLink}`);
   } catch (e) {
