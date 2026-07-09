@@ -166,7 +166,20 @@ async function initTelegram() {
       https.get(`https://api.telegram.org/bot${TG_TOKEN}/deleteWebhook?drop_pending_updates=true`, () => resolve()).on('error', () => resolve());
     });
     await delWebhook();
-    telegramBot = new TelegramBot(TG_TOKEN, { polling: true });
+    telegramBot = new TelegramBot(TG_TOKEN, { 
+      polling: { 
+        interval: 2000,  // reduced frequency to fix lag/rate limits (was causing 429s)
+        autoStart: true,
+        params: { timeout: 30 }  // long polling for efficiency
+      } 
+    });
+    // Handle polling errors to prevent lag/crashes
+    telegramBot.on('polling_error', (err) => {
+      logger.warn(`TG polling error: ${err.code || err} - ${err.message || err}`);
+      if (err.code === 'ETELEGRAM' && err.message && err.message.includes('429')) {
+        logger.warn('TG rate limit hit - slowing down polling temporarily');
+      }
+    });
 
     // Helper to send main menu with buttons - fast and usable
     const sendMainMenu = async (chatId, text = '🤖 <b>Robinhood Sniper</b> - fast menu') => {
@@ -187,19 +200,21 @@ async function initTelegram() {
               { text: '🔍 Diag', callback_data: 'diag' }
             ],
             [
-              { text: '⛽ Gas', callback_data: 'gas' },
+              { text: '⛽ Gas/Fees', callback_data: 'gas' },
               { text: '📈 PnL', callback_data: 'pnl' },
               { text: '🪙 Holdings', callback_data: 'holdings' }
             ],
             [
-              { text: '🔄 Refresh', callback_data: 'refresh' },
-              { text: '📊 Stats', callback_data: 'stats' }
+              { text: '💰 Spent', callback_data: 'spent' },
+              { text: '📊 Stats', callback_data: 'stats' },
+              { text: '🔄 Refresh', callback_data: 'refresh' }
+            ],
+            [
+              { text: '⚙️ Config', callback_data: 'config' },
+              { text: '🔎 Check', callback_data: 'check' }  // note: needs addr, will prompt
             ],
             [
               { text: pauseText, callback_data: 'toggle_pause' },
-              { text: '⚙️ Config', callback_data: 'config' }
-            ],
-            [
               { text: '🛑 Stop', callback_data: 'stop' }
             ]
           ]
@@ -214,9 +229,10 @@ async function initTelegram() {
             ['/s', '/p', '/sa'],
             ['/r', '/poll', '/d'],
             ['/gas', '/pnl', '/holdings'],
-            ['/check', '/snipe', '/refresh'],
-            ['/spent', '/config', '/stats'],
-            ['/block', '/estimate', '/lastsells'],
+            ['/spent', '/received', '/stats'],
+            ['/config', '/block', '/last'],
+            ['/refresh', '/check', '/snipe'],
+            ['/sellmoon', '/clearpos', '/strategy'],
             ['/menu']
           ],
           resize_keyboard: true,
@@ -676,6 +692,19 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
           `Moonbag: ${STRATEGY.moonbagPct || 25}%`;
         await telegramBot.sendMessage(chatId, cfgText);
         await sendMainMenu(chatId);
+      } else if (data === 'spent') {
+        let total = 0;
+        for (const p of positions) {
+          total += Number(ethers.formatEther(p.entryPrice || 0n));
+        }
+        await telegramBot.sendMessage(chatId, `Total est spent: ${total.toFixed(6)} ETH across ${positions.length} pos`);
+        await sendMainMenu(chatId);
+      } else if (data === 'block') {
+        const block = await provider.getBlockNumber().catch(() => 'N/A');
+        await telegramBot.sendMessage(chatId, `Current block: ${block} (mainnet)`);
+        await sendMainMenu(chatId);
+      } else if (data === 'check') {
+        await telegramBot.sendMessage(chatId, 'Send /check <addr> to analyze (e.g. /check 0x...)');
       } else if (data === 'stop') {
         await sendTg('🛑 Stopping bot...');
         process.exit(0);
