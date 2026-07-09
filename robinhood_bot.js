@@ -519,23 +519,15 @@ async function buyToken(curveAddress, amountStr) {
   const buyAmount = ethers.parseEther(amountStr);
   logger.info(`[MANUAL BUY] ${curveAddress} for ${amountStr} ETH`);
 
-  const curve = new ethers.Contract(curveAddress, curveABI, wallet);
   try {
-    let minOut = 0n;
-    let gasEst;
-    try {
-      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: buyAmount });
-    } catch (e) {
-      // fallback
-      minOut = 0n;
-      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: buyAmount });
-    }
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    const tx = await curve.buy(minOut, wallet.address, {
+    // Use direct sendTransaction to the curve addr (many bonding curves accept ETH directly for buy)
+    const tx = await wallet.sendTransaction({
+      to: curveAddress,
       value: buyAmount,
-      gasLimit: gasEst * 140n / 100n,
+      gasLimit: 300000n,
       maxFeePerGas: maxFee,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
@@ -591,16 +583,14 @@ async function forceBuy(curveAddress, amountStr) {
   const buyAmount = ethers.parseEther(amountStr);
   logger.info(`[FORCE BUY] ${curveAddress} for ${amountStr} ETH (bypassing checks)`);
 
-  const curve = new ethers.Contract(curveAddress, curveABI, wallet);
   try {
-    const minOut = 0n;
-    const gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: buyAmount }).catch(() => 300000n);
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    const tx = await curve.buy(minOut, wallet.address, {
+    const tx = await wallet.sendTransaction({
+      to: curveAddress,
       value: buyAmount,
-      gasLimit: gasEst * 150n / 100n,
+      gasLimit: 300000n,
       maxFeePerGas: maxFee,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
@@ -948,9 +938,10 @@ async function snipe(curveAddress, symbol) {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    const tx = await curve.buy(minOut, wallet.address, {
+    const tx = await wallet.sendTransaction({
+      to: curveAddress,
       value: SNIPE_AMOUNT,
-      gasLimit: gasEst * 145n / 100n,
+      gasLimit: 300000n,
       maxFeePerGas: maxFee,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
