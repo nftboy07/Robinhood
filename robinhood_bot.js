@@ -2332,7 +2332,7 @@ async function pollNewLaunches() {
   }
   pollingInProgress = true;
   try {
-    const current = await withRetry(() => provider.getBlockNumber(), 4, 12000);
+    const current = await withRetry(() => directProvider.getBlockNumber(), 4, 12000);
     if (lastPolledBlock === 0) lastPolledBlock = current - 20;
 
     if (current <= lastPolledBlock) {
@@ -2353,21 +2353,22 @@ async function pollNewLaunches() {
 
     let logs = [];
     try {
-      logs = await withRetry(() => provider.getLogs({
+      // Use directProvider for getLogs to avoid FallbackProvider network-changed errors
+      logs = await withRetry(() => directProvider.getLogs({
         address: useFactory,
         fromBlock,
         toBlock: current,
         topics: [topic]
       }), 3, 18000) || [];
     } catch (e) {
-      logger.warn('getLogs (launches) failed: ' + (e.message || e));
+      logger.debug('getLogs (launches) failed: ' + (e.message || e));
     }
 
     // Fallback: also scan known launch contracts for activity
     if ((!logs || logs.length === 0) && KNOWN_LAUNCH_CONTRACTS.length > 0) {
       for (const known of KNOWN_LAUNCH_CONTRACTS) {
         try {
-          const extra = await withRetry(() => provider.getLogs({
+          const extra = await withRetry(() => directProvider.getLogs({
             address: known,
             fromBlock,
             toBlock: current,
@@ -2419,7 +2420,7 @@ async function pollNewLaunches() {
 
     // Detect graduations (migrations) for open positions
     try {
-      const completeLogs = await withRetry(() => provider.getLogs({
+      const completeLogs = await withRetry(() => directProvider.getLogs({
         fromBlock,
         toBlock: current,
         topics: [curveCompleteTopic]
