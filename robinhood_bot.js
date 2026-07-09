@@ -206,7 +206,8 @@ async function initTelegram() {
         reply_markup: {
           keyboard: [
             ['/s', '/p', '/sa'],
-            ['/r', '/poll', '/menu']
+            ['/r', '/poll', '/d'],
+            ['/menu']
           ],
           resize_keyboard: true,
           one_time_keyboard: false
