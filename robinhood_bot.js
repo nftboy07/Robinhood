@@ -154,8 +154,8 @@ async function initTelegram() {
     const TelegramBot = require('node-telegram-bot-api');
     telegramBot = new TelegramBot(TG_TOKEN, { polling: true });
 
-    // Helper to send main menu with buttons
-    const sendMainMenu = async (chatId, text = '🤖 Robinhood Sniper Menu - fun.noxa.fi/robinhood') => {
+    // Helper to send main menu with buttons - fast and usable
+    const sendMainMenu = async (chatId, text = '🤖 <b>Robinhood Sniper</b> - fast menu') => {
       const opts = {
         reply_markup: {
           inline_keyboard: [
@@ -165,20 +165,15 @@ async function initTelegram() {
             ],
             [
               { text: '💸 Sell All', callback_data: 'sell_all' },
-              { text: '🔄 Force Poll', callback_data: 'poll' }
+              { text: '🔄 Poll Now', callback_data: 'poll' }
+            ],
+            [
+              { text: '🆕 Recent', callback_data: 'recent' },
+              { text: '🧪 Test Buy', callback_data: 'test_buy' }
             ],
             [
               { text: '⚙️ Config', callback_data: 'config' },
-              { text: '🛑 Stop Bot', callback_data: 'stop' }
-            ],
-            [
-              { text: '📋 Recent Launches', callback_data: 'recent' }
-            ],
-            [
-              { text: '🧪 Test Buy Menu', callback_data: 'test_buy' }
-            ],
-            [
-              { text: '🔁 Refresh Menu', callback_data: 'menu' }
+              { text: '🛑 Stop', callback_data: 'stop' }
             ]
           ]
         },
@@ -192,14 +187,53 @@ async function initTelegram() {
       if (String(msg.chat.id) !== String(TG_CHAT)) return;
       const text = (msg.text || '').trim().toLowerCase();
 
-      if (text === '/start' || text === '/menu') {
+      if (text === '/start' || text === '/menu' || text === '/m') {
         await sendMainMenu(msg.chat.id);
-      } else if (text === '/status') {
+      } else if (text === '/status' || text === '/s') {
         await handleStatus(msg.chat.id);
-      } else if (text === '/positions') {
+      } else if (text === '/positions' || text === '/p') {
         await handlePositions(msg.chat.id);
-      } else if (text === '/help') {
-        await telegramBot.sendMessage(msg.chat.id, 'Use the menu buttons or /menu\nCommands: /status /positions /sellall');
+      } else if (text === '/sellall' || text === '/sa') {
+        if (positions.length === 0) {
+          await sendTg('No open positions to sell.');
+        } else {
+          await sendTg('Selling all positions...');
+          for (const pos of [...positions]) {
+            await sellPosition(pos);
+          }
+        }
+      } else if (text === '/poll') {
+        await sendTg('🔄 Forcing poll for new launches...');
+        await pollNewLaunches();
+      } else if (text === '/help' || text === '/h' || text === '/commands') {
+        const helpText = `Usable commands:
+ /menu or /m - Main menu
+ /s or /status - Status
+ /p or /positions - Positions
+ /sa or /sellall - Sell all
+ /poll - Force poll
+ /recent or /r - Recent launches
+ /help or /h - This help
+
+Use buttons for fast actions. New launches auto-post buy buttons.`;
+        await telegramBot.sendMessage(msg.chat.id, helpText);
+      } else if (text === '/recent' || text === '/r') {
+        // Trigger recent handler
+        // Simulate callback or duplicate logic
+        if (recentLaunches.length === 0) {
+          await telegramBot.sendMessage(msg.chat.id, 'No recent launches yet.');
+        } else {
+          let txt = '📋 <b>Recent Launches</b>\n';
+          const kbd = { inline_keyboard: [] };
+          recentLaunches.forEach((l, i) => {
+            const age = Math.floor((Date.now() - l.time)/1000);
+            txt += `${i+1}. ${l.symbol} (${age}s ago)\n`;
+            kbd.inline_keyboard.push([
+              { text: `Buy ${l.symbol}`, callback_data: `showbuy_${l.addr}` }
+            ]);
+          });
+          await telegramBot.sendMessage(msg.chat.id, txt, { parse_mode: 'HTML', reply_markup: kbd });
+        }
       }
     });
 
@@ -344,12 +378,12 @@ async function sendBuyMenu(tokenAddr, fallbackSymbol = "NEW") {
   const keyboard = {
     inline_keyboard: [
       [
-        { text: "0.003", callback_data: `buy_${tokenAddr}_0.003` },
-        { text: "0.005", callback_data: `buy_${tokenAddr}_0.005` }
+        { text: "Buy 0.003 ETH", callback_data: `buy_${tokenAddr}_0.003` },
+        { text: "Buy 0.005 ETH", callback_data: `buy_${tokenAddr}_0.005` }
       ],
       [
-        { text: "0.007", callback_data: `buy_${tokenAddr}_0.007` },
-        { text: "0.01", callback_data: `buy_${tokenAddr}_0.01` }
+        { text: "Buy 0.007 ETH", callback_data: `buy_${tokenAddr}_0.007` },
+        { text: "Buy 0.01 ETH", callback_data: `buy_${tokenAddr}_0.01` }
       ],
       [
         { text: "Auto 0.0001", callback_data: `buy_${tokenAddr}_0.0001` }
