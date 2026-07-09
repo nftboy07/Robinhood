@@ -989,36 +989,7 @@ async function sendAlert(text) {
   } catch (e) { return false; }
 }
 
-// Helper to fetch real token name and symbol from the contract + Blockscout for nameless memes
-async function getTokenInfo(addr) {
-  let name = "Unknown Token";
-  let symbol = "???";
-  // Always try Blockscout first for reliable names (especially if addr is curve or token)
-  try {
-    const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${addr}`);
-    if (res.ok) {
-      const data = await res.json();
-      const tokenInfo = data.token || data;
-      if (tokenInfo.name) name = tokenInfo.name;
-      if (tokenInfo.symbol) symbol = tokenInfo.symbol;
-    }
-  } catch (e) {}
-  // Then try on-chain ERC20 if better
-  try {
-    const erc20Abi = [
-      "function name() view returns (string)",
-      "function symbol() view returns (string)"
-    ];
-    const token = new ethers.Contract(addr, erc20Abi, provider);
-    const [onName, onSym] = await Promise.all([
-      token.name().catch(() => name),
-      token.symbol().catch(() => symbol)
-    ]);
-    if (onName && onName !== "Unknown Token") name = onName;
-    if (onSym && onSym !== "???") symbol = onSym;
-  } catch {}
-  return { name, symbol };
-}
+// getTokenInfo is implemented below with full caching and parallel execution.
 
 // Send buy menu for a newly detected token with specific amounts
 // tokenAddr = address for buy buttons (curve), nameAddr = optional for ERC20 name lookup
@@ -1222,6 +1193,45 @@ async function forceBuy(curveAddress, amountStr) {
   }
 }
 
+const tokenInfoCache = new Map();
+
+async function getTokenInfo(addr) {
+  if (!addr || addr === '0x0000000000000000000000000000000000000000') return { name: "Unknown Token", symbol: "???" };
+  const cached = tokenInfoCache.get(addr.toLowerCase());
+  if (cached) return cached;
+
+  let name = "Unknown Token";
+  let symbol = "???";
+  // Try Blockscout API
+  try {
+    const res = await withTimeout(fetch(`https://robinhoodchain.blockscout.com/api/v2/tokens/${addr}`), 4000, 'getTokenInfo fetch').catch(() => null);
+    if (res && res.ok) {
+      const data = await res.json();
+      const tokenInfo = data.token || data;
+      if (tokenInfo.name) name = tokenInfo.name;
+      if (tokenInfo.symbol) symbol = tokenInfo.symbol;
+    }
+  } catch (e) {}
+  // Then try on-chain ERC20 if better
+  try {
+    const erc20Abi = [
+      "function name() view returns (string)",
+      "function symbol() view returns (string)"
+    ];
+    const token = new ethers.Contract(addr, erc20Abi, provider);
+    const [onName, onSym] = await Promise.all([
+      token.name().catch(() => name),
+      token.symbol().catch(() => symbol)
+    ]);
+    if (onName && onName !== "Unknown Token") name = onName;
+    if (onSym && onSym !== "???") symbol = onSym;
+  } catch {}
+  
+  const result = { name, symbol };
+  tokenInfoCache.set(addr.toLowerCase(), result);
+  return result;
+}
+
 async function handleStatus(chatId) {
   const pos = positions.length;
   const dailyPnl = dailyStats.realizedPnl.toFixed(4);
@@ -1240,15 +1250,18 @@ async function handlePositions(chatId) {
     await telegramBot.sendMessage(chatId, 'No open positions.');
     return;
   }
-  let text = '📍 <b>Open Positions</b>\n';
-  for (let i = 0; i < positions.length; i++) {
-    const p = positions[i];
+  
+  await sendTg('⏳ Loading position details in parallel...');
+  
+  // Resolve positions in parallel
+  const resolvedPositions = await Promise.all(positions.map(async (p, i) => {
     const entry = ethers.formatEther(p.entryPrice);
     const sold = p.soldAmount ? ethers.formatEther(p.soldAmount) : '0';
     let entryStr = entry;
-    if (p.entryPrice === 0n) entryStr = "0 (tracking incomplete - check tx for actual spent)";
+    if (p.entryPrice === 0n) entryStr = "0 (tracking incomplete)";
     const posCurve = p.curve || p.token;
     const posTok = p.token || p.curve || p.token;
+    
     let liveBal = p.amount;
     if (p.amount === 0n) {
       try {
@@ -1261,11 +1274,21 @@ async function handlePositions(chatId) {
     if (info.name === "Unknown Token" || info.symbol === "???") {
       sym = `Token (${(posTok || posCurve).slice(0,6)}...${(posTok || posCurve).slice(-4)})`;
     }
-    text += `${i+1}. ${sym} (${posTok})\n   Entry: ${entryStr} | Sold: ${sold} | Bal: ${balStr} | Re-entries: ${p.reEntries || 0}\n`;
-  }
+    
+    return {
+      text: `${i+1}. ${sym} (${posTok})\n   Entry: ${entryStr} | Sold: ${sold} | Bal: ${balStr} | Re-entries: ${p.reEntries || 0}\n`,
+      symbol: sym
+    };
+  }));
+
+  let text = '📍 <b>Open Positions</b>\n';
+  resolvedPositions.forEach(rp => {
+    text += rp.text;
+  });
+
   const keyboard = {
     inline_keyboard: positions.map((p, i) => [
-      { text: `💸 Sell #${i+1} ${p.symbol.slice(0,10)}`, callback_data: `sell_${i}` }
+      { text: `💸 Sell #${i+1} ${resolvedPositions[i].symbol.slice(0,10)}`, callback_data: `sell_${i}` }
     ])
   };
   await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard });
