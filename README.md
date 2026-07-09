@@ -324,9 +324,15 @@ Your `.env` and `config.json` stay untouched (they are gitignored). Only edit th
 
 See:
 - `VPS_UPDATE_COMMANDS.txt`
-- `COMMANDS.md` (big list of commands that produce **real output** — blocks, txs, discovery, logs, TG responses)
+- `COMMANDS.md` (big list of commands that produce **real output** — blocks, txs, discovery, logs, TG responses, /diag)
 
 Both in the repo root.
+
+**To do all (full update + real output):**
+After SSH to VPS:
+```bash
+cd ~/robinhood-bot && git pull origin main && npm install --production && pm2 restart robinhood-sniper --update-env && node vps_diag.js && echo "=== NOW IN TG: /d or /diag for live block/balance ==="
+```
 
 ## GitHub / References (adapt from prompt)
 
