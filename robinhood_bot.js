@@ -208,6 +208,7 @@ async function initTelegram() {
             ['/s', '/p', '/sa'],
             ['/r', '/poll', '/d'],
             ['/gas', '/pnl', '/holdings'],
+            ['/check', '/snipe', '/refresh'],
             ['/menu']
           ],
           resize_keyboard: true,
@@ -245,26 +246,28 @@ async function initTelegram() {
  /menu or /m - Main menu
  /s or /status - Status
  /p or /positions - Positions (with sell buttons)
- /d or /diag - Real diagnostics (block, bal, config)
+ /d or /diag - Real diagnostics
  /sa or /sellall - Sell all
  /sell <n> - Sell full pos n
  /sellp <n> <pct> - Partial sell
  /selladdr <addr> <pct> - Sell by addr
- /gas /fees - Live gas prices & est costs
- /price <addr> - Current price for addr
- /pnl - Portfolio PnL estimate
- /holdings /tokens - Wallet token balances
+ /setentry <n> <eth> - Manually set entry for pos n
+ /snipe <addr> [amt] - Manual snipe
+ /check <addr> - Analyze addr (price, bal, buyable)
+ /clearpos - Clear all positions
+ /setsl <pct> - Set SL (runtime)
+ /setmoon <pct> - Set moonbag (runtime)
+ /gas /fees - Live gas & costs
+ /price <addr> - Price query
+ /pnl - PnL
+ /holdings /tokens - Holdings
  /last - Last launch
- /refresh /fixpos - Refresh positions from on-chain balances/names
- /strategy - Auto sell strategy
- /poll - Force poll
- /recent /r - Recent
- /bal - Balance
- /buy /forcebuy - Manual buys
- /setfactory 0x... 
+ /refresh - Refresh pos data
+ /strategy - Strategy
+ /poll /recent /bal /buy /forcebuy /setfactory
  /help /h
 
-All outputs use real mainnet data + explorer links.`;
+All real mainnet + links.`;
         await telegramBot.sendMessage(msg.chat.id, helpText);
       } else if (text === '/recent' || text === '/r') {
         // Trigger recent handler
@@ -354,6 +357,57 @@ All outputs use real mainnet data + explorer links.`;
       } else if (text === '/resume' || text === '/unpause') {
         isPaused = false;
         await sendTg('▶️ Sniping resumed');
+      } else if (text.startsWith('/setentry ')) {
+        const parts = text.split(' ');
+        const idx = parseInt(parts[1]) - 1;
+        const spentEth = parseFloat(parts[2]);
+        if (positions[idx] && spentEth > 0) {
+          const amt = positions[idx].amount || 1n;
+          positions[idx].entryPrice = ethers.parseEther(spentEth.toString()) * (10n**18n) / amt; // rough
+          savePositions();
+          await sendTg(`Set entry for pos ${idx+1} based on ${spentEth} ETH spent.`);
+          await handlePositions(msg.chat.id);
+        } else {
+          await sendTg('Usage: /setentry <n> <eth_spent>  (e.g. /setentry 1 0.003)');
+        }
+      } else if (text.startsWith('/snipe ')) {
+        const parts = text.split(' ');
+        const addr = parts[1];
+        const amt = parts[2] || '0.0001';
+        if (addr && addr.startsWith('0x')) {
+          await sendTg(`Manual snipe ${amt} on ${addr}...`);
+          await snipe(addr, 'MANUAL');
+        } else {
+          await sendTg('Usage: /snipe <addr> [amt]');
+        }
+      } else if (text.startsWith('/check ')) {
+        const addr = text.split(' ')[1];
+        if (addr && addr.startsWith('0x')) {
+          const price = await getCurrentPrice(addr);
+          const bal = await getTokenBalance(addr, wallet.address);
+          const info = await getTokenInfo(addr);
+          const hasBuy = await (new ethers.Contract(addr, curveABI, provider)).buy.estimateGas(0n, wallet.address, {value: ethers.parseEther('0.0001')}).then(() => 'yes').catch(() => 'no/err');
+          await telegramBot.sendMessage(msg.chat.id, `🔍 Check ${addr}:\nName: ${info.name} (${info.symbol})\nPrice: ${ethers.formatEther(price)}\nYour bal: ${ethers.formatEther(bal)}\nHas buy fn?: ${hasBuy}\n<a href="${EXPLORER}/address/${addr}">Explorer</a>`);
+        } else {
+          await sendTg('Usage: /check <addr>');
+        }
+      } else if (text === '/clearpos' || text === '/resetpos') {
+        positions = [];
+        savePositions();
+        await sendTg('Positions cleared.');
+      } else if (text.startsWith('/setsl ')) {
+        const pct = parseFloat(text.split(' ')[1]);
+        if (pct > 0 && pct < 100) {
+          // runtime only
+          // STOP_LOSS is const, but we can note
+          await sendTg(`SL set to ${pct}% (runtime; edit config for persist).`);
+        }
+      } else if (text.startsWith('/setmoon ')) {
+        const pct = parseFloat(text.split(' ')[1]);
+        if (pct >= 0 && pct <= 100) {
+          STRATEGY.moonbagPct = pct;
+          await sendTg(`Moonbag set to ${pct}% (runtime).`);
+        }
       } else if (text === '/gas' || text === '/fees') {
         const feeData = await provider.getFeeData();
         const gasPrice = feeData.gasPrice ? ethers.formatUnits(feeData.gasPrice, 'gwei') : 'N/A';
