@@ -18,7 +18,8 @@ ls -l robinhood_bot.js config.json.example .env* 2>/dev/null || true
 # - Edit if needed:
 #   nano .env          # confirm PK, TELEGRAM_TOKEN, ADMIN_CHAT_ID
 #   nano config.json   # set REAL factory, weth, router (use discover.js output or devtools)
-#                      # You can safely delete "dryRun" line if still present (code ignores it now)
+#                      # Run: node discover.js while a launch happens on the site for candidates.
+#                      # Copy the printed "READY CONFIG SNIPPET" and edit the addresses.
 
 # Install/update deps if package changed
 npm install --production
@@ -30,6 +31,7 @@ pm2 restart robinhood-sniper --update-env
 pm2 logs robinhood-sniper --lines 50
 
 # To see status in TG: send /menu or /s to your bot
+# New in this update: tx links in alerts, configurable snipe size, better positions list
 
 echo "Bot should now be running LIVE MAINNET with no dry-run code path at all."
 
@@ -37,4 +39,11 @@ echo "Bot should now be running LIVE MAINNET with no dry-run code path at all."
 # pm2 start ecosystem.config.js --update-env
 # pm2 save
 
-# Monitor first launches with /poll or wait for auto.
+# Recommended next:
+# 1. Set real factory etc in config.json
+# 2. Run node tg_diag.js to test TG
+# 3. Fund wallet (printed on start)
+# 4. /menu in TG, /poll to force scan, wait for launches on fun.noxa.fi/robinhood
+# 5. Watch for auto snipe + buttons + tx links
+
+# Monitor first real activity and report back logs or tx if wanted.
