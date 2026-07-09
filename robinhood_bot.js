@@ -479,9 +479,22 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
           await sendTg('Usage: /check <addr>');
         }
       } else if (text === '/clearpos' || text === '/resetpos') {
-        positions = [];
+        const before = positions.length;
+        const deadPositions = [];
+        for (const p of [...positions]) {
+          const tok = p.token || p.curve;
+          const liveBal = await getTokenBalance(tok, wallet.address).catch(() => 0n);
+          if (liveBal === 0n && p.amount === 0n) deadPositions.push(p);
+        }
+        for (const p of deadPositions) {
+          const idx = positions.indexOf(p);
+          if (idx !== -1) positions.splice(idx, 1);
+        }
         savePositions();
-        await sendTg('Positions cleared.');
+        const cleared = before - positions.length;
+        await sendTg(`🗑️ Cleared ${cleared} dead position(s). ${positions.length} active remaining.`);
+        if (positions.length > 0) await handlePositions(msg.chat.id);
+        else await sendMainMenu(msg.chat.id, '✅ All stale positions cleared.');
       } else if (text.startsWith('/setsl ')) {
         const pct = parseFloat(text.split(' ')[1]);
         if (pct > 0 && pct < 100) {
@@ -644,21 +657,58 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
           await telegramBot.sendMessage(msg.chat.id, 'Usage: /price 0xaddr');
         }
       } else if (text === '/pnl' || text === '/profit') {
+        await sendTg('⏳ Fetching real on-chain PnL...');
+
+        // Realized from DB
+        const histStats = db.getWinRateStats();
+        const realSign = histStats.totalRealizedPnl >= 0 ? '+' : '';
+        const winRateStr = histStats.totalTrades > 0 ? `${histStats.winRate.toFixed(1)}%` : 'N/A';
+
+        // Unrealized from chain
         let totalUnreal = 0;
+        let totalValue = 0;
         let totalSpent = 0;
-        let hasIncomplete = false;
+        const posLines = [];
         for (const p of positions) {
-          const spent = Number(ethers.formatEther(p.entryPrice || 0n));
-          if (spent === 0) hasIncomplete = true;
+          const tok = p.token || p.curve;
+          const liveBal = await getTokenBalance(tok, wallet.address).catch(() => 0n);
+          const price = await getCurrentPrice(p.curve || tok).catch(() => 0n);
+          const spent = p.entryPrice > 0n ? Number(ethers.formatEther(p.entryPrice)) : 0;
           totalSpent += spent;
-          const posC = p.curve || p.token; const currP = await getCurrentPrice(posC);
-          const pnlPct = (p.entryPrice > 0n && currP > 0n) ? ((Number(currP) - Number(p.entryPrice)) / Number(p.entryPrice)) * 100 : 0;
-          const unreal = Number(ethers.formatEther(p.amount || 0n)) * (pnlPct / 100);
-          totalUnreal += unreal;
+          let valueEth = 0;
+          let pnlEth = 0;
+          if (liveBal > 0n && price > 0n) {
+            valueEth = Number(ethers.formatEther((liveBal * price) / (10n**18n)));
+            pnlEth = spent > 0 ? valueEth - spent : 0;
+            totalValue += valueEth;
+            totalUnreal += pnlEth;
+          }
+          const info = await getTokenInfo(tok);
+          const sym = (info.symbol && info.symbol !== '???') ? info.symbol : tok.slice(0,8)+'...';
+          const s = pnlEth >= 0 ? '+' : '';
+          const balNote = liveBal === 0n ? '(no bal)' : `${ethers.formatEther(liveBal).slice(0,8)}`;
+          posLines.push(`  • ${sym}: ${s}${pnlEth.toFixed(4)} ETH [${balNote}]`);
         }
+
+        const unrSign = totalUnreal >= 0 ? '+' : '';
         const bal = await getBalance();
-        let note = hasIncomplete ? '\n(Note: some positions have incomplete entry tracking - PnL approximate)' : '';
-        await telegramBot.sendMessage(msg.chat.id, `📊 <b>PnL (Mainnet)</b>\nPositions: ${positions.length}\nUnrealized PnL: ~${totalUnreal.toFixed(6)} ETH\nEst Total Spent: ~${totalSpent.toFixed(4)} ETH\nCurrent Bal: ${ethers.formatEther(bal)} ETH\n(Realized tracked in dailyStats)${note}`);
+        const balEth = parseFloat(ethers.formatEther(bal));
+
+        let pnlMsg = `📊 <b>Real P&amp;L Report</b>\n`;
+        pnlMsg += `💰 Balance: <b>${balEth.toFixed(6)} ETH</b>\n\n`;
+        pnlMsg += `📈 <b>Realized (All-Time)</b>\n`;
+        pnlMsg += `P&amp;L: <b>${realSign}${histStats.totalRealizedPnl.toFixed(6)} ETH</b>\n`;
+        pnlMsg += `Trades: ${histStats.totalTrades} | Wins: ${histStats.wins} | Losses: ${histStats.losses}\n`;
+        pnlMsg += `Win Rate: ${winRateStr}\n\n`;
+        pnlMsg += `📉 <b>Unrealized (Open Positions)</b>\n`;
+        pnlMsg += `Active: ${positions.length} pos | Est Value: ${totalValue.toFixed(4)} ETH\n`;
+        pnlMsg += `Unrealized: <b>${unrSign}${totalUnreal.toFixed(6)} ETH</b>\n`;
+        if (posLines.length > 0) pnlMsg += posLines.join('\n') + '\n';
+        pnlMsg += `\n💸 Total Entry Cost: ~${totalSpent.toFixed(4)} ETH\n`;
+        pnlMsg += `<a href="${EXPLORER}/address/${wallet.address}">View Wallet on Explorer</a>`;
+
+        await telegramBot.sendMessage(msg.chat.id, pnlMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+        await sendMainMenu(msg.chat.id);
       } else if (text === '/holdings' || text === '/tokens') {
         let out = '🪙 <b>Holdings (Mainnet)</b>\n';
         const addrs = [...new Set(positions.map(p => p.token || p.curve).concat(recentLaunches.map(l => l.addr)))];
