@@ -824,21 +824,57 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
         await telegramBot.sendMessage(chatId, `⛽ <b>Gas (Mainnet)</b>\nGas Price: ${gasPrice} gwei\nMax Fee: ${maxFee} gwei\nPriority: ${prio} gwei\nEst Buy (0.0001): ~${buyCost} ETH\nEst Sell: ~${sellCost} ETH\nBlock: ${await provider.getBlockNumber().catch(()=>'?')}`);
         await sendMainMenu(chatId);
       } else if (data === 'pnl' || data === 'profit') {
+        await telegramBot.answerCallbackQuery(query.id, { text: '⏳ Fetching real PnL...' });
+
+        // --- Realized PnL from persistent DB ---
+        const histStats = db.getWinRateStats();
+        const realSign = histStats.totalRealizedPnl >= 0 ? '+' : '';
+        const winRateStr = histStats.totalTrades > 0 ? `${histStats.winRate.toFixed(1)}%` : 'N/A';
+
+        // --- Unrealized PnL from live chain ---
         let totalUnreal = 0;
+        let totalValue = 0;
         let totalSpent = 0;
-        let hasIncomplete = false;
+        const posLines = [];
         for (const p of positions) {
-          const spent = Number(ethers.formatEther(p.entryPrice || 0n));
-          if (spent === 0) hasIncomplete = true;
+          const tok = p.token || p.curve;
+          const liveBal = await getTokenBalance(tok, wallet.address).catch(() => 0n);
+          const price = await getCurrentPrice(p.curve || tok).catch(() => 0n);
+          const spent = p.entryPrice > 0n ? Number(ethers.formatEther(p.entryPrice)) : 0;
           totalSpent += spent;
-          const posC = p.curve || p.token; const currP = await getCurrentPrice(posC);
-          const pnlPct = (p.entryPrice > 0n && currP > 0n) ? ((Number(currP) - Number(p.entryPrice)) / Number(p.entryPrice)) * 100 : 0;
-          const unreal = Number(ethers.formatEther(p.amount || 0n)) * (pnlPct / 100);
-          totalUnreal += unreal;
+          let valueEth = 0;
+          let pnlEth = 0;
+          if (liveBal > 0n && price > 0n) {
+            valueEth = Number(ethers.formatEther((liveBal * price) / (10n**18n)));
+            pnlEth = spent > 0 ? valueEth - spent : 0;
+            totalValue += valueEth;
+            totalUnreal += pnlEth;
+          }
+          const info = await getTokenInfo(tok);
+          const sym = (info.symbol && info.symbol !== '???') ? info.symbol : tok.slice(0,8)+'...';
+          const s = pnlEth >= 0 ? '+' : '';
+          const balNote = liveBal === 0n ? '(no bal)' : `${ethers.formatEther(liveBal).slice(0,8)}`;
+          posLines.push(`  • ${sym}: ${s}${pnlEth.toFixed(4)} ETH [${balNote}]`);
         }
+
+        const unrSign = totalUnreal >= 0 ? '+' : '';
         const bal = await getBalance();
-        let note = hasIncomplete ? '\n(Note: some positions have incomplete entry tracking - PnL approximate)' : '';
-        await telegramBot.sendMessage(chatId, `📊 <b>PnL (Mainnet)</b>\nPositions: ${positions.length}\nUnrealized PnL: ~${totalUnreal.toFixed(6)} ETH\nEst Total Spent: ~${totalSpent.toFixed(4)} ETH\nCurrent Bal: ${ethers.formatEther(bal)} ETH\n(Realized tracked in dailyStats)${note}`);
+        const balEth = parseFloat(ethers.formatEther(bal));
+
+        let pnlMsg = `📊 <b>Real PnL Report</b>\n`;
+        pnlMsg += `💰 Balance: <b>${balEth.toFixed(6)} ETH</b>\n\n`;
+        pnlMsg += `📈 <b>Realized (All-Time)</b>\n`;
+        pnlMsg += `P&amp;L: <b>${realSign}${histStats.totalRealizedPnl.toFixed(6)} ETH</b>\n`;
+        pnlMsg += `Trades: ${histStats.totalTrades} | Wins: ${histStats.wins} | Losses: ${histStats.losses}\n`;
+        pnlMsg += `Win Rate: ${winRateStr}\n\n`;
+        pnlMsg += `📉 <b>Unrealized (Open Positions)</b>\n`;
+        pnlMsg += `Active: ${positions.length} pos | Est Value: ${totalValue.toFixed(4)} ETH\n`;
+        pnlMsg += `Unrealized PnL: <b>${unrSign}${totalUnreal.toFixed(6)} ETH</b>\n`;
+        if (posLines.length > 0) pnlMsg += posLines.join('\n') + '\n';
+        pnlMsg += `\n💸 Total Entry Cost: ~${totalSpent.toFixed(4)} ETH\n`;
+        pnlMsg += `<a href="${EXPLORER}/address/${wallet.address}">View on Explorer</a>`;
+
+        await telegramBot.sendMessage(chatId, pnlMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
         await sendMainMenu(chatId);
       } else if (data === 'holdings' || data === 'tokens') {
         let out = '🪙 <b>Holdings (Mainnet)</b>\n';
@@ -854,6 +890,24 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
         out += `Native: ${ethers.formatEther(await getBalance())} ETH\n<a href="${EXPLORER}/address/${wallet.address}">Wallet</a>`;
         await telegramBot.sendMessage(chatId, out);
         await sendMainMenu(chatId);
+      } else if (data === 'clearpos') {
+        // Clear dead zero-balance positions
+        const before = positions.length;
+        const deadPositions = [];
+        for (const p of [...positions]) {
+          const tok = p.token || p.curve;
+          const liveBal = await getTokenBalance(tok, wallet.address).catch(() => 0n);
+          if (liveBal === 0n && p.amount === 0n) deadPositions.push(p);
+        }
+        for (const p of deadPositions) {
+          const idx = positions.indexOf(p);
+          if (idx !== -1) positions.splice(idx, 1);
+        }
+        savePositions();
+        const cleared = before - positions.length;
+        await sendTg(`🗑️ Cleared ${cleared} dead position(s). ${positions.length} remaining.`);
+        if (positions.length > 0) await handlePositions(chatId);
+        else await sendMainMenu(chatId, `✅ All stale positions cleared.`);
       } else if (data === 'refresh' || data === 'fixpos') {
         await sendTg('Refreshing positions from on-chain...');
         for (const p of positions) {
@@ -1233,65 +1287,160 @@ async function getTokenInfo(addr) {
 }
 
 async function handleStatus(chatId) {
-  const pos = positions.length;
-  const dailyPnl = dailyStats.realizedPnl.toFixed(4);
-  const moonbag = STRATEGY.moonbagPct || 25;
-  const bal = await getBalance();
-  const balEth = ethers.formatEther(bal);
+  // Send instant reply first
+  await sendTg('⏳ Fetching real on-chain data...');
+
+  const [bal, block] = await Promise.all([
+    getBalance(),
+    directProvider.getBlockNumber().catch(() => '?')
+  ]);
+  const balEth = parseFloat(ethers.formatEther(bal));
   const walletLink = `${EXPLORER}/address/${wallet.address}`;
-  let note = '';
-  if (positions.some(p => p.entryPrice === 0n || p.amount === 0n)) note = '\n(Note: some positions have incomplete tracking from past buys - verify on explorer)';
-  const text = `📊 <b>Status</b>\nWallet: <a href="${walletLink}">${wallet.address}</a>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nBalance: ${balEth} ETH\nMode: LIVE MAINNET\nMoonbag: ${moonbag}% held${note}`;
-  await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+
+  // Realized PnL from persistent trade history
+  const histStats = db.getWinRateStats();
+
+  // Unrealized PnL: scan all tracked positions for live values
+  let unrealizedEth = 0;
+  let activePositions = 0;
+  const posDetails = [];
+
+  // Auto-purge dead positions (amount=0 AND no on-chain balance)
+  const purgeable = [];
+  for (const p of positions) {
+    const tok = p.token || p.curve;
+    const liveBal = await getTokenBalance(tok, wallet.address).catch(() => 0n);
+    if (liveBal === 0n && p.amount === 0n) {
+      purgeable.push(p);
+      continue;
+    }
+    const price = await getCurrentPrice(p.curve || tok).catch(() => 0n);
+    const valueEth = liveBal > 0n && price > 0n ? Number(ethers.formatEther((liveBal * price) / (10n**18n))) : 0;
+    const entryEth = p.entryPrice > 0n ? Number(ethers.formatEther(p.entryPrice)) : 0;
+    const pnlEth = entryEth > 0 ? valueEth - entryEth : 0;
+    unrealizedEth += pnlEth;
+    activePositions++;
+    const info = await getTokenInfo(tok);
+    posDetails.push({ sym: `${info.name} (${info.symbol})`, valueEth, pnlEth });
+  }
+
+  // Purge dead positions
+  if (purgeable.length > 0) {
+    for (const p of purgeable) {
+      const idx = positions.indexOf(p);
+      if (idx !== -1) positions.splice(idx, 1);
+    }
+    savePositions();
+    logger.info(`[STATUS] Auto-purged ${purgeable.length} dead zero-balance positions`);
+  }
+
+  const realPnlSign = histStats.totalRealizedPnl >= 0 ? '+' : '';
+  const unrSign = unrealizedEth >= 0 ? '+' : '';
+  const winRateStr = histStats.totalTrades > 0 ? `${histStats.winRate.toFixed(1)}%` : 'N/A';
+
+  let text = `📊 <b>Status — Live Mainnet</b>\n`;
+  text += `<a href="${walletLink}">${wallet.address.slice(0,10)}...${wallet.address.slice(-8)}</a>\n`;
+  text += `Block: ${block} | Paused: ${isPaused ? '⏸️' : '▶️'}\n\n`;
+  text += `💰 <b>Balance:</b> <b>${balEth.toFixed(6)} ETH</b>\n\n`;
+  text += `📈 <b>Realized PnL (All-Time)</b>\n`;
+  text += `Total: <b>${realPnlSign}${histStats.totalRealizedPnl.toFixed(6)} ETH</b>\n`;
+  text += `Trades: ${histStats.totalTrades} | Wins: ${histStats.wins} | Losses: ${histStats.losses}\n`;
+  text += `Win Rate: ${winRateStr}\n\n`;
+  text += `📉 <b>Unrealized PnL (Open Positions)</b>\n`;
+  text += `Active: ${activePositions} pos | Est: <b>${unrSign}${unrealizedEth.toFixed(6)} ETH</b>\n`;
+  if (posDetails.length > 0) {
+    posDetails.forEach(pd => {
+      const s = pd.pnlEth >= 0 ? '+' : '';
+      text += `  • ${pd.sym}: ${s}${pd.pnlEth.toFixed(4)} ETH (~${pd.valueEth.toFixed(4)} ETH value)\n`;
+    });
+  }
+  if (purgeable.length > 0) text += `\n🗑️ Auto-cleared ${purgeable.length} stale zero-balance position(s).`;
+  if (activePositions === 0 && histStats.totalTrades === 0) {
+    text += `\n💡 No trades yet. Bot is scanning for launches.`;
+  }
+
+  await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true });
 }
 
 async function handlePositions(chatId) {
   if (positions.length === 0) {
-    await telegramBot.sendMessage(chatId, 'No open positions.');
+    await telegramBot.sendMessage(chatId, '📍 No open positions tracked.\n\nUse /status to see your balance or /history for past trades.');
     return;
   }
-  
-  await sendTg('⏳ Loading position details in parallel...');
-  
-  // Resolve positions in parallel
+
+  await sendTg('⏳ Loading live position data...');
+
+  // Resolve all positions in parallel with live on-chain data
   const resolvedPositions = await Promise.all(positions.map(async (p, i) => {
-    const entry = ethers.formatEther(p.entryPrice);
-    const sold = p.soldAmount ? ethers.formatEther(p.soldAmount) : '0';
-    let entryStr = entry;
-    if (p.entryPrice === 0n) entryStr = "0 (tracking incomplete)";
+    const posTok = p.token || p.curve;
     const posCurve = p.curve || p.token;
-    const posTok = p.token || p.curve || p.token;
-    
-    let liveBal = p.amount;
-    if (p.amount === 0n) {
-      try {
-        liveBal = await getTokenBalance(posTok, wallet.address);
-      } catch {}
-    }
+
+    // Live balance from chain
+    const liveBal = await getTokenBalance(posTok, wallet.address).catch(() => 0n);
     const balStr = ethers.formatEther(liveBal);
+
+    // Live price
+    const price = await getCurrentPrice(posCurve).catch(() => 0n);
+    const priceStr = price > 0n ? ethers.formatEther(price) : 'N/A';
+
+    // Live value + PnL
+    let valueStr = 'N/A';
+    let pnlStr = '';
+    if (liveBal > 0n && price > 0n) {
+      const valueWei = (liveBal * price) / (10n**18n);
+      const valueEth = parseFloat(ethers.formatEther(valueWei));
+      valueStr = valueEth.toFixed(6) + ' ETH';
+      if (p.entryPrice > 0n) {
+        const entryEth = parseFloat(ethers.formatEther(p.entryPrice));
+        const pnlEth = valueEth - entryEth;
+        const pnlPct = (pnlEth / entryEth) * 100;
+        const sign = pnlEth >= 0 ? '+' : '';
+        pnlStr = ` | PnL: <b>${sign}${pnlEth.toFixed(4)} ETH (${sign}${pnlPct.toFixed(1)}%)</b>`;
+      }
+    } else if (liveBal === 0n) {
+      valueStr = '⚠️ Zero balance (stale?)';
+    }
+
     const info = await getTokenInfo(posTok);
     let sym = `${info.name} (${info.symbol})`;
-    if (info.name === "Unknown Token" || info.symbol === "???") {
-      sym = `Token (${(posTok || posCurve).slice(0,6)}...${(posTok || posCurve).slice(-4)})`;
+    if (info.name === 'Unknown Token' || info.symbol === '???') {
+      sym = `Token (${posTok.slice(0,6)}...${posTok.slice(-4)})`;
     }
-    
+
+    const entryStr = p.entryPrice > 0n ? ethers.formatEther(p.entryPrice) + ' ETH' : 'Unknown';
+    const migStr = p.isMigrated ? ' 🔄 DEX' : ' 🟢 Curve';
+    const explorerLink = `${EXPLORER}/address/${posTok}`;
+
     return {
-      text: `${i+1}. ${sym} (${posTok})\n   Entry: ${entryStr} | Sold: ${sold} | Bal: ${balStr} | Re-entries: ${p.reEntries || 0}\n`,
-      symbol: sym
+      text: `${i+1}. <b>${sym}</b>${migStr}\n` +
+            `   <a href="${explorerLink}">${posTok.slice(0,10)}...${posTok.slice(-6)}</a>\n` +
+            `   Bal: <b>${balStr}</b> | Price: ${priceStr}\n` +
+            `   Value: <b>${valueStr}</b>${pnlStr}\n` +
+            `   Entry: ${entryStr} | Re-entries: ${p.reEntries || 0}\n`,
+      symbol: sym,
+      isDead: liveBal === 0n
     };
   }));
 
-  let text = '📍 <b>Open Positions</b>\n';
-  resolvedPositions.forEach(rp => {
-    text += rp.text;
-  });
+  const active = resolvedPositions.filter(r => !r.isDead);
+  const dead = resolvedPositions.filter(r => r.isDead);
+
+  let text = `📍 <b>Positions (${positions.length} tracked, ${active.length} active)</b>\n\n`;
+  resolvedPositions.forEach(rp => { text += rp.text + '\n'; });
+
+  if (dead.length > 0) {
+    text += `\n💡 ${dead.length} position(s) have zero balance. Use /clearpos to clean them up.`;
+  }
 
   const keyboard = {
-    inline_keyboard: positions.map((p, i) => [
-      { text: `💸 Sell #${i+1} ${resolvedPositions[i].symbol.slice(0,10)}`, callback_data: `sell_${i}` }
-    ])
+    inline_keyboard: [
+      ...positions.map((p, i) => [
+        { text: `💸 Sell #${i+1} ${resolvedPositions[i].symbol.slice(0,10)}`, callback_data: `sell_${i}` }
+      ]),
+      [{ text: '🗑️ Clear Dead Positions', callback_data: 'clearpos' }]
+    ]
   };
-  await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard });
+  await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard, disable_web_page_preview: true });
 }
 
 async function handleDiag(chatId) {
