@@ -146,6 +146,10 @@ let dailyStats = {
 // Sniping pause state (for safety)
 let isPaused = false;
 
+// Guards to prevent overlapping heavy work (main cause of "stuck" on slow RPC/TG)
+let pollingInProgress = false;
+let monitoringInProgress = false;
+
 // Telegram command queue
 let pendingCommands = [];
 
@@ -179,6 +183,11 @@ async function initTelegram() {
       if (err.code === 'ETELEGRAM' && err.message && err.message.includes('429')) {
         logger.warn('TG rate limit hit - slowing down polling temporarily');
       }
+      // If repeated disconnects, the interval guards + retry in poll will keep core logic alive
+    });
+
+    telegramBot.on('error', (err) => {
+      logger.warn('TG bot error: ' + (err.message || err));
     });
 
     // Helper to send main menu with buttons - fast and usable
@@ -264,7 +273,15 @@ async function initTelegram() {
         }
       } else if (text === '/poll') {
         await sendTg('🔄 Forcing poll for new launches...');
+        lastPolledBlock = 0; // force fresh scan
         await pollNewLaunches();
+      } else if (text === '/resetpoll' || text === '/unstuck') {
+        lastPolledBlock = 0;
+        pollingInProgress = false;
+        monitoringInProgress = false;
+        await sendTg('🔄 Poll state reset. Forcing fresh poll...');
+        await pollNewLaunches();
+        await handlePositions(msg.chat.id);
       } else if (text === '/help' || text === '/h' || text === '/commands' || text === '/list') {
         const helpText = `All commands (real mainnet outputs only):
 
@@ -303,6 +320,7 @@ async function initTelegram() {
 
 **Control:**
 /poll - force poll launches
+/resetpoll /unstuck - reset poll state + force (use if bot appears stuck)
 /r /recent - recent launches + buy buttons
 /bal /balance - wallet balance
 /pause /resume /unpause - pause/resume
@@ -585,7 +603,7 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
           const spent = Number(ethers.formatEther(p.entryPrice || 0n));
           if (spent === 0) hasIncomplete = true;
           totalSpent += spent;
-          const currP = await getCurrentPrice(p.token);
+          const posC = p.curve || p.token; const currP = await getCurrentPrice(posC);
           const pnlPct = (p.entryPrice > 0n && currP > 0n) ? ((Number(currP) - Number(p.entryPrice)) / Number(p.entryPrice)) * 100 : 0;
           const unreal = Number(ethers.formatEther(p.amount || 0n)) * (pnlPct / 100);
           totalUnreal += unreal;
@@ -619,8 +637,9 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
       } else if (text === '/refresh' || text === '/fixpos') {
         await sendTg('Refreshing positions from on-chain...');
         for (const p of positions) {
+          const taddr = p.token || p.curve;
           if (p.amount === 0n || p.entryPrice === 0n) {
-            const bal = await getTokenBalance(p.token, wallet.address);
+            const bal = await getTokenBalance(taddr, wallet.address);
             if (bal > 0n) {
               p.amount = bal;
               if (p.entryPrice === 0n) {
@@ -629,7 +648,7 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
               }
             }
           }
-          const info = await getTokenInfo(p.token);
+          const info = await getTokenInfo(taddr);
           if (info.name && !info.name.includes('Unknown')) {
             p.symbol = `${info.name} (${info.symbol})`;
           }
@@ -763,7 +782,7 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
           const spent = Number(ethers.formatEther(p.entryPrice || 0n));
           if (spent === 0) hasIncomplete = true;
           totalSpent += spent;
-          const currP = await getCurrentPrice(p.token);
+          const posC = p.curve || p.token; const currP = await getCurrentPrice(posC);
           const pnlPct = (p.entryPrice > 0n && currP > 0n) ? ((Number(currP) - Number(p.entryPrice)) / Number(p.entryPrice)) * 100 : 0;
           const unreal = Number(ethers.formatEther(p.amount || 0n)) * (pnlPct / 100);
           totalUnreal += unreal;
@@ -792,8 +811,9 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
       } else if (data === 'refresh' || data === 'fixpos') {
         await sendTg('Refreshing positions from on-chain...');
         for (const p of positions) {
+          const taddr = p.token || p.curve;
           if (p.amount === 0n || p.entryPrice === 0n) {
-            const bal = await getTokenBalance(p.token, wallet.address);
+            const bal = await getTokenBalance(taddr, wallet.address);
             if (bal > 0n) {
               p.amount = bal;
               if (p.entryPrice === 0n) {
@@ -801,7 +821,7 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
               }
             }
           }
-          const info = await getTokenInfo(p.token);
+          const info = await getTokenInfo(taddr);
           if (info.name && !info.name.includes('Unknown')) {
             p.symbol = `${info.name} (${info.symbol})`;
           }
@@ -912,31 +932,35 @@ async function getTokenInfo(addr) {
 // tokenAddr = address for buy buttons (curve), nameAddr = optional for ERC20 name lookup
 async function sendBuyMenu(tokenAddr, fallbackSymbol = "NEW", nameAddr = null) {
   if (!telegramBot || !TG_CHAT || !ENABLE_TG) return;
-  const lookupAddr = nameAddr || tokenAddr;
-  const info = await getTokenInfo(lookupAddr);
-  let displayName = `${info.name} (${info.symbol})`;
-  if (info.name === "Unknown Token" || info.symbol === "???") {
-    displayName = `Unnamed Meme Token`;
-  }
-  const shortAddr = tokenAddr.slice(0, 6) + "..." + tokenAddr.slice(-4);
-  const explorer = `https://robinhoodchain.blockscout.com/address/${tokenAddr}`;
-  const text = `🚀 <b>New Launch Detected</b>\n${displayName}\n<code>${tokenAddr}</code> (${shortAddr})\n<a href="${explorer}">View on Explorer</a>\n\nChoose buy amount (ETH):`;
-  const keyboard = {
-    inline_keyboard: [
-      [
-        { text: "Buy 0.003 ETH", callback_data: `buy_${tokenAddr}_0.003` },
-        { text: "Buy 0.005 ETH", callback_data: `buy_${tokenAddr}_0.005` }
-      ],
-      [
-        { text: "Buy 0.007 ETH", callback_data: `buy_${tokenAddr}_0.007` },
-        { text: "Buy 0.01 ETH", callback_data: `buy_${tokenAddr}_0.01` }
-      ],
-      [
-        { text: "Auto 0.0001", callback_data: `buy_${tokenAddr}_0.0001` }
+  try {
+    const lookupAddr = nameAddr || tokenAddr;
+    const info = await getTokenInfo(lookupAddr);
+    let displayName = `${info.name} (${info.symbol})`;
+    if (info.name === "Unknown Token" || info.symbol === "???") {
+      displayName = `Unnamed Meme Token`;
+    }
+    const shortAddr = tokenAddr.slice(0, 6) + "..." + tokenAddr.slice(-4);
+    const explorer = `https://robinhoodchain.blockscout.com/address/${tokenAddr}`;
+    const text = `🚀 <b>New Launch Detected</b>\n${displayName}\n<code>${tokenAddr}</code> (${shortAddr})\n<a href="${explorer}">View on Explorer</a>\n\nChoose buy amount (ETH):`;
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "Buy 0.003 ETH", callback_data: `buy_${tokenAddr}_0.003` },
+          { text: "Buy 0.005 ETH", callback_data: `buy_${tokenAddr}_0.005` }
+        ],
+        [
+          { text: "Buy 0.007 ETH", callback_data: `buy_${tokenAddr}_0.007` },
+          { text: "Buy 0.01 ETH", callback_data: `buy_${tokenAddr}_0.01` }
+        ],
+        [
+          { text: "Auto 0.0001", callback_data: `buy_${tokenAddr}_0.0001` }
+        ]
       ]
-    ]
-  };
-  await telegramBot.sendMessage(TG_CHAT, text, { parse_mode: 'HTML', reply_markup: keyboard });
+    };
+    await telegramBot.sendMessage(TG_CHAT, text, { parse_mode: 'HTML', reply_markup: keyboard });
+  } catch (e) {
+    logger.debug('sendBuyMenu failed: ' + (e.message || e));
+  }
 }
 
 // General buy function for variable amount
@@ -965,13 +989,14 @@ async function buyToken(curveAddress, amountStr) {
       maxFeePerGas: maxFee,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
-    const receipt = await tx.wait();
+    const receipt = await withTimeout(tx.wait(), 120000, 'buy tx.wait');
     const txHash = receipt.hash || receipt.transactionHash || 'unknown';
     const txLink = `${EXPLORER}/tx/${txHash}`;
 
-    // Add to positions using actual balance diff
+    // Use log parsing first for real received amount (curve vs token mismatch safe)
+    const fromLog = await getReceivedAmountFromReceipt(receipt, wallet.address);
     const balAfter = await getTokenBalance(curveAddress, wallet.address);
-    const amount = balAfter > balBefore ? (balAfter - balBefore) : 0n;
+    let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
     if (amount === 0n) {
       logger.warn(`[BUY] No tokens received for ${curveAddress}`);
       await sendTg(`⚠️ Buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
@@ -989,11 +1014,12 @@ async function buyToken(curveAddress, amountStr) {
     await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
 
     // Check if already have position
-    const existing = positions.find(p => p.token === curveAddress);
+    const existing = positions.find(p => (p.curve || p.token) === curveAddress || p.token === curveAddress);
     if (existing) {
       existing.amount += amount;
     } else {
       positions.push({
+        curve: curveAddress,
         token: curveAddress,
         symbol: `${info.name} (${info.symbol})`,
         amount,
@@ -1038,12 +1064,13 @@ async function forceBuy(curveAddress, amountStr) {
       maxFeePerGas: maxFee,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
-    const receipt = await tx.wait();
+    const receipt = await withTimeout(tx.wait(), 120000, 'forcebuy tx.wait');
     const txHash = receipt.hash || receipt.transactionHash || 'unknown';
     const txLink = `${EXPLORER}/tx/${txHash}`;
 
+    const fromLog = await getReceivedAmountFromReceipt(receipt, wallet.address);
     const balAfter = await getTokenBalance(curveAddress, wallet.address);
-    const amount = balAfter > balBefore ? (balAfter - balBefore) : 0n;
+    let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
     if (amount === 0n) {
       logger.warn(`[FORCE BUY] No tokens received for ${curveAddress}`);
       await sendTg(`⚠️ Force buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
@@ -1059,11 +1086,12 @@ async function forceBuy(curveAddress, amountStr) {
     await sendAlert(`✅ Force Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
     await sendTg(`✅ Force Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
 
-    const existing = positions.find(p => p.token === curveAddress);
+    const existing = positions.find(p => (p.curve || p.token) === curveAddress || p.token === curveAddress);
     if (existing) {
       existing.amount += amount;
     } else {
       positions.push({
+        curve: curveAddress,
         token: curveAddress,
         symbol: `${info.name} (${info.symbol})`,
         amount,
@@ -1108,19 +1136,21 @@ async function handlePositions(chatId) {
     const sold = p.soldAmount ? ethers.formatEther(p.soldAmount) : '0';
     let entryStr = entry;
     if (p.entryPrice === 0n) entryStr = "0 (tracking incomplete - check tx for actual spent)";
+    const posCurve = p.curve || p.token;
+    const posTok = p.token || p.curve || p.token;
     let liveBal = p.amount;
     if (p.amount === 0n) {
       try {
-        liveBal = await getTokenBalance(p.token, wallet.address);
+        liveBal = await getTokenBalance(posTok, wallet.address);
       } catch {}
     }
     const balStr = ethers.formatEther(liveBal);
-    const info = await getTokenInfo(p.token);
+    const info = await getTokenInfo(posTok);
     let sym = `${info.name} (${info.symbol})`;
     if (info.name === "Unknown Token" || info.symbol === "???") {
-      sym = `Token (${p.token.slice(0,6)}...${p.token.slice(-4)})`;
+      sym = `Token (${(posTok || posCurve).slice(0,6)}...${(posTok || posCurve).slice(-4)})`;
     }
-    text += `${i+1}. ${sym} (${p.token})\n   Entry: ${entryStr} | Sold: ${sold} | Bal: ${balStr} | Re-entries: ${p.reEntries || 0}\n`;
+    text += `${i+1}. ${sym} (${posTok})\n   Entry: ${entryStr} | Sold: ${sold} | Bal: ${balStr} | Re-entries: ${p.reEntries || 0}\n`;
   }
   const keyboard = {
     inline_keyboard: positions.map((p, i) => [
@@ -1174,6 +1204,8 @@ function loadPositions() {
       const raw = JSON.parse(fs.readFileSync(POSITIONS_FILE, 'utf8'));
       positions = raw.map(p => ({
         ...p,
+        curve: p.curve || p.token,
+        token: p.token || p.curve,
         amount: BigInt(p.amount),
         entryPrice: BigInt(p.entryPrice),
         highestPrice: BigInt(p.highestPrice || p.entryPrice),
@@ -1207,14 +1239,27 @@ function savePositions() {
   } catch (e) {}
 }
 
-async function withRetry(fn, retries = 3) {
+async function withRetry(fn, retries = 3, timeoutMs = 15000) {
   for (let i = 0; i < retries; i++) {
-    try { return await fn(); } 
-    catch (e) { 
-      if (i === retries - 1) throw e; 
-      await new Promise(r => setTimeout(r, 400 * (i + 1))); 
+    try {
+      const result = await Promise.race([
+        fn(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs))
+      ]);
+      return result;
+    } catch (e) {
+      if (i === retries - 1) throw e;
+      await new Promise(r => setTimeout(r, 600 * (i + 1)));
     }
   }
+}
+
+// Timeout wrapper for any promise (use for tx.wait etc.)
+function withTimeout(promise, ms, label = 'op') {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(label + ' timed out after ' + ms + 'ms')), ms))
+  ]);
 }
 
 async function getCurrentPrice(tokenAddr) {
@@ -1236,6 +1281,39 @@ async function getBalance() {
     const bal = await provider.getBalance(wallet.address);
     return bal;
   } catch { return 0n; }
+}
+
+// Reliable received token amount extractor from tx receipt logs (Transfer or Trade events)
+// This fixes "no tokens received" even when balanceOf is queried on curve vs actual ERC20 token
+async function getReceivedAmountFromReceipt(receipt, owner) {
+  if (!receipt || !receipt.logs) return 0n;
+  const ownerLower = owner.toLowerCase();
+  const transferTopic = ethers.id('Transfer(address,address,uint256)');
+  const tradeTopic = ethers.id('Trade(address,bool,uint256,uint256)');
+  let received = 0n;
+  for (const log of receipt.logs) {
+    try {
+      if (!log.topics || !log.topics[0]) continue;
+      const topic0 = log.topics[0];
+      if (topic0 === transferTopic) {
+        const to = '0x' + log.topics[2].slice(-40);
+        if (to.toLowerCase() === ownerLower) {
+          const val = BigInt(log.data || '0x0');
+          if (val > 0n) received = val;
+        }
+      }
+      if (topic0 === tradeTopic) {
+        // Trade(trader, isBuy, ethAmount, tokenAmount) - tokenAmount is last 32 bytes of data
+        const data = (log.data || '').replace('0x', '');
+        if (data.length >= 64) {
+          const tokenAmtHex = '0x' + data.slice(-64);
+          const amt = BigInt(tokenAmtHex);
+          if (amt > 0n) received = amt;
+        }
+      }
+    } catch {}
+  }
+  return received;
 }
 
 // ====================== NEW UPGRADES: Curve math, Honeypot, DEX sell, Risk ======================
@@ -1357,9 +1435,10 @@ async function sellOnDex(tokenAddress, tokenAmount) {
 }
 
 // ====================== SNIPE (focus fun.noxa.fi) ======================
-async function snipe(curveAddress, symbol) {
+async function snipe(curveAddress, symbol = null, tokenAddr = null) {
+  const sym = symbol || 'LAUNCH';
   if (isPaused) {
-    logger.info(`[PAUSED] Skipping snipe for ${symbol}`);
+    logger.info(`[PAUSED] Skipping snipe for ${sym}`);
     return;
   }
   if (positions.length >= MAX_POS) return;
@@ -1372,7 +1451,7 @@ async function snipe(curveAddress, symbol) {
     return;
   }
 
-  logger.info(`[SNIPE] ${symbol} @ ${curveAddress} | ${ethers.formatEther(SNIPE_AMOUNT)} ETH (fun.noxa.fi)`);
+  logger.info(`[SNIPE] ${sym} @ ${curveAddress} (token ${tokenAddr || curveAddress}) | ${ethers.formatEther(SNIPE_AMOUNT)} ETH (fun.noxa.fi)`);
 
   // Honeypot / bad curve check
   if (await isHoneypotOrBad(curveAddress)) {
@@ -1407,14 +1486,6 @@ async function snipe(curveAddress, symbol) {
 
     const balBefore = await getTokenBalance(curveAddress, wallet.address);
 
-    let minOut = 0n;
-    let gasEst = 300000n;
-    try {
-      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: SNIPE_AMOUNT });
-    } catch (e) {
-      gasEst = 300000n;
-    }
-
     const tx = await curve.buy(minOut, wallet.address, {
       value: SNIPE_AMOUNT,
       gasLimit: gasEst * 145n / 100n,
@@ -1422,12 +1493,13 @@ async function snipe(curveAddress, symbol) {
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
 
-    const receipt = await tx.wait();
+    const receipt = await withTimeout(tx.wait(), 120000, 'snipe tx.wait');
     const txHash = receipt.hash || receipt.transactionHash || 'unknown';
     logger.info(`[BOUGHT] ${symbol} tx: ${txHash}`);
 
+    const fromLog = await getReceivedAmountFromReceipt(receipt, wallet.address);
     const balAfter = await getTokenBalance(curveAddress, wallet.address);
-    const amount = balAfter > balBefore ? (balAfter - balBefore) : (estimated || 0n);
+    let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : (estimated || 0n));
     if (amount === 0n) {
       logger.warn(`[SNIPE] No tokens received for ${curveAddress}`);
       await sendTg(`⚠️ Snipe tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
@@ -1439,8 +1511,10 @@ async function snipe(curveAddress, symbol) {
     }
     const info = await getTokenInfo(curveAddress);
 
+    const storedToken = tokenAddr || curveAddress;
     positions.push({ 
-      token: curveAddress, 
+      curve: curveAddress,
+      token: storedToken, 
       symbol: symbol || `${info.name} (${info.symbol})`, 
       amount, 
       entryPrice, 
@@ -1455,11 +1529,11 @@ async function snipe(curveAddress, symbol) {
     savePositions();
 
     const txLink = `${EXPLORER}/tx/${txHash}`;
-    await sendTg(`✅ Bought <b>${symbol}</b> on fun.noxa.fi/robinhood\nEst. amount: ${ethers.formatEther(amount)}\n<a href="${txLink}">View tx</a>`);
+    await sendTg(`✅ Bought <b>${sym}</b> on fun.noxa.fi/robinhood\nEst. amount: ${ethers.formatEther(amount)}\n<a href="${txLink}">View tx</a>`);
     await sendAlert(`✅ Snipe bought ${symbol}\n${txLink}`);
   } catch (e) {
-    logger.error(`[SNIPE FAIL] ${symbol}: ${e.message}`);
-    await sendTg(`❌ Snipe failed ${symbol}`);
+    logger.error(`[SNIPE FAIL] ${sym}: ${e.message}`);
+    await sendTg(`❌ Snipe failed ${sym}`);
   }
 }
 
@@ -1468,20 +1542,22 @@ async function sellPosition(pos) {
   // LIVE mainnet - always attempt real sell
 
   // If migrated to DEX, use DEX sell
+  const posCurve = pos.curve || pos.token;
+  const posKey = pos.token || pos.curve;
   if (pos.isMigrated && ROUTER) {
-    await sellOnDex(pos.token, pos.amount);
-    positions = positions.filter(p => p.token !== pos.token);
+    await sellOnDex(posKey, pos.amount);
+    positions = positions.filter(p => (p.token || p.curve) !== posKey);
     savePositions();
     return;
   }
 
-  const curve = new ethers.Contract(pos.token, curveABI, wallet);
+  const curve = new ethers.Contract(posCurve, curveABI, wallet);
   try {
     const tx = await curve.sell(pos.amount, 0n, { gasLimit: 550000 });
     await tx.wait();
     logger.info(`[SOLD] ${pos.symbol}`);
     await sendTg(`💰 Sold <b>${pos.symbol}</b>`);
-    positions = positions.filter(p => p.token !== pos.token);
+    const key = pos.token || pos.curve; positions = positions.filter(p => (p.token || p.curve) !== key);
     savePositions();
   } catch (e) {
     logger.error(`Sell error: ${e.message}`);
@@ -1504,7 +1580,7 @@ async function sellPercent(pos, pct) {
 }
 
 async function sellByAddr(addr, pct = 100) {
-  let pos = positions.find(p => p.token.toLowerCase() === addr.toLowerCase());
+  let pos = positions.find(p => ((p.token||p.curve)||'').toLowerCase() === addr.toLowerCase());
   if (!pos) {
     pos = { token: addr, amount: 0n, soldAmount: 0n, symbol: 'Unknown', isMigrated: false };
   }
@@ -1533,31 +1609,37 @@ async function sellByAddr(addr, pct = 100) {
 
 // ====================== MONITOR ======================
 async function monitorPositions() {
-  for (const pos of [...positions]) {
-    try {
-      const price = await getCurrentPrice(pos.token);
-      if (!price || price === 0n) {
-        if (ROUTER && !pos.isMigrated) {
-          pos.isMigrated = true;
-          logger.info(`[MIGRATED] ${pos.symbol} switched to DEX mode`);
-          await sendTg(`🔄 ${pos.symbol} graduated to DEX - will use DEX sells`);
+  if (monitoringInProgress) return;
+  monitoringInProgress = true;
+  try {
+    for (const pos of [...positions]) {
+      try {
+        const price = await getCurrentPrice(pos.curve || pos.token);
+        if (!price || price === 0n) {
+          if (ROUTER && !pos.isMigrated) {
+            pos.isMigrated = true;
+            logger.info(`[MIGRATED] ${pos.symbol} switched to DEX mode`);
+            sendTg(`🔄 ${pos.symbol} graduated to DEX - will use DEX sells`).catch(()=>{});
+          }
+          continue;
         }
-        continue;
+
+        const entry = Number(pos.entryPrice);
+        const curr = Number(price);
+        const pnl = entry > 0 ? ((curr - entry) / entry) * 100 : 0;
+
+        // Update peak
+        if (price > pos.highestPrice) pos.highestPrice = price;
+
+        // === SAFE MEME STRATEGY IMPLEMENTATION ===
+        await manageSafeStrategy(pos, price, pnl);
+
+      } catch (e) {
+        logger.debug(`Monitor error for ${pos.symbol}: ${e.message}`);
       }
-
-      const entry = Number(pos.entryPrice);
-      const curr = Number(price);
-      const pnl = entry > 0 ? ((curr - entry) / entry) * 100 : 0;
-
-      // Update peak
-      if (price > pos.highestPrice) pos.highestPrice = price;
-
-      // === SAFE MEME STRATEGY IMPLEMENTATION ===
-      await manageSafeStrategy(pos, price, pnl);
-
-    } catch (e) {
-      logger.debug(`Monitor error for ${pos.symbol}: ${e.message}`);
     }
+  } finally {
+    monitoringInProgress = false;
   }
 }
 
@@ -1566,7 +1648,7 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
   const entryPrice = Number(pos.entryPrice);
   let remainingAmount = pos.amount - (pos.soldAmount || 0n);
   if (remainingAmount <= 0n) {
-    positions = positions.filter(p => p.token !== pos.token);
+    const key = pos.token || pos.curve; positions = positions.filter(p => (p.token || p.curve) !== key);
     savePositions();
     return;
   }
@@ -1679,11 +1761,23 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
 
 // ====================== POLLING (fun.noxa.fi focus) ======================
 async function pollNewLaunches() {
+  if (pollingInProgress) {
+    logger.debug('poll skipped - previous run still in progress (RPC slow?)');
+    return;
+  }
+  pollingInProgress = true;
   try {
-    const current = await withRetry(() => provider.getBlockNumber());
-    if (lastPolledBlock === 0) lastPolledBlock = current - 30;
+    const current = await withRetry(() => provider.getBlockNumber(), 4, 12000);
+    if (lastPolledBlock === 0) lastPolledBlock = current - 20;
 
-    if (current <= lastPolledBlock) return;
+    if (current <= lastPolledBlock) {
+      pollingInProgress = false;
+      return;
+    }
+
+    // Clamp range to avoid huge scans that hang the bot (common stuck cause)
+    const MAX_SCAN_BLOCKS = 400;
+    const fromBlock = Math.max(lastPolledBlock + 1, current - MAX_SCAN_BLOCKS);
 
     const topic = config.eventTopic || ethers.id('TokenCreated(address,address,string,string,uint256)');
     const curveCompleteTopic = ethers.id('CurveCompleted(address,uint256,uint256)');
@@ -1691,83 +1785,101 @@ async function pollNewLaunches() {
     // New launches - force broad scan if factory is placeholder
     const effectiveFactory = globalThis.FACTORY_OVERRIDE || FACTORY;
     const useFactory = effectiveFactory && !effectiveFactory.includes('REPLACE') ? effectiveFactory : undefined;
-    let logs = await withRetry(() => provider.getLogs({
-      address: useFactory,
-      fromBlock: lastPolledBlock + 1,
-      toBlock: current,
-      topics: [topic]
-    }));
+
+    let logs = [];
+    try {
+      logs = await withRetry(() => provider.getLogs({
+        address: useFactory,
+        fromBlock,
+        toBlock: current,
+        topics: [topic]
+      }), 3, 18000) || [];
+    } catch (e) {
+      logger.warn('getLogs (launches) failed: ' + (e.message || e));
+    }
 
     // Fallback: also scan known launch contracts for activity
     if ((!logs || logs.length === 0) && KNOWN_LAUNCH_CONTRACTS.length > 0) {
       for (const known of KNOWN_LAUNCH_CONTRACTS) {
-        const extra = await withRetry(() => provider.getLogs({
-          address: known,
-          fromBlock: lastPolledBlock + 1,
-          toBlock: current,
-          topics: [topic]
-        })).catch(() => []);
-        logs = logs.concat(extra);
+        try {
+          const extra = await withRetry(() => provider.getLogs({
+            address: known,
+            fromBlock,
+            toBlock: current,
+            topics: [topic]
+          }), 2, 10000).catch(() => []);
+          if (extra && extra.length) logs = logs.concat(extra);
+        } catch {}
       }
     }
 
     for (const log of logs) {
       if (isPaused) break;
       try {
-        // Use topics[1] as token, topics[2] as curve if present (common in launch events)
-        let buyAddr = '0x' + log.topics[1].slice(-40);
+        // Standard: topics[1] = token (ERC20 for balance/name), topics[2] = curve (for buy/sell/getPrice)
+        const tokenAddr = '0x' + log.topics[1].slice(-40);
+        let curveAddr = tokenAddr;
         if (log.topics.length > 2 && log.topics[2] && log.topics[2] !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
-          buyAddr = '0x' + log.topics[2].slice(-40);
+          curveAddr = '0x' + log.topics[2].slice(-40);
         }
-        const tokenForName = '0x' + log.topics[1].slice(-40); // for name lookup, use token
-        logger.info(`[NEW LAUNCH] curve/buy: ${buyAddr} (token: ${tokenForName}) on fun.noxa.fi/robinhood`);
-        await sendAlert(`🚀 New launch: ${buyAddr} on fun.noxa.fi/robinhood`);
-        await sendTg(`🚀 New launch detected: <code>${buyAddr}</code>`);
-        // Send buy buttons with real token name, using buyAddr for the buttons
-        await sendBuyMenu(buyAddr, "NEW", tokenForName);
-        // Get info for recent list using token
-        const info = await getTokenInfo(tokenForName);
-        let display = `${info.name} (${info.symbol})`;
-        if (info.name === "Unknown Token") {
-          const short = tokenForName.slice(0,6) + "..." + tokenForName.slice(-4);
-          display = `Unnamed (${short})`;
-        }
-        // Track for recent (use buyAddr for actual buy)
-        recentLaunches.unshift({addr: buyAddr, symbol: display, time: Date.now()});
-        if (recentLaunches.length > 5) recentLaunches.pop();
-        // Keep small auto snipe if desired - use buyAddr
-        setTimeout(() => snipe(buyAddr, info.symbol), 1800);
-      } catch {
-        const buyAddr = '0x' + log.topics[1].slice(-40);
-        await sendBuyMenu(buyAddr, 'LAUNCH', buyAddr);
-        recentLaunches.unshift({addr: buyAddr, symbol: 'LAUNCH', time: Date.now()});
-        if (recentLaunches.length > 5) recentLaunches.pop();
-        setTimeout(() => snipe(buyAddr, 'LAUNCH'), 2000);
+        logger.info(`[NEW LAUNCH] curve: ${curveAddr} (token: ${tokenAddr}) on fun.noxa.fi/robinhood`);
+        // Fire-and-forget alerts / menus so one slow TG doesn't block poll loop
+        sendAlert(`🚀 New launch: ${curveAddr} on fun.noxa.fi/robinhood`).catch(()=>{});
+        sendTg(`🚀 New launch detected: <code>${curveAddr}</code>`).catch(()=>{});
+        sendBuyMenu(curveAddr, "NEW", tokenAddr).catch(()=>{});
+        // Get info + recent (non blocking for main poll)
+        getTokenInfo(tokenAddr).then(info => {
+          let display = `${info.name} (${info.symbol})`;
+          if (info.name === "Unknown Token") {
+            const short = tokenAddr.slice(0,6) + "..." + tokenAddr.slice(-4);
+            display = `Unnamed (${short})`;
+          }
+          recentLaunches.unshift({addr: curveAddr, symbol: display, time: Date.now()});
+          if (recentLaunches.length > 5) recentLaunches.pop();
+        }).catch(()=>{});
+        // Auto snipe uses curveAddr (buy target) - delayed
+        setTimeout(() => snipe(curveAddr, null, tokenAddr), 1500);
+      } catch (logErr) {
+        try {
+          const addr = '0x' + log.topics[1].slice(-40);
+          sendBuyMenu(addr, 'LAUNCH', addr).catch(()=>{});
+          recentLaunches.unshift({addr: addr, symbol: 'LAUNCH', time: Date.now()});
+          if (recentLaunches.length > 5) recentLaunches.pop();
+          setTimeout(() => snipe(addr, 'LAUNCH'), 1800);
+        } catch {}
       }
     }
 
     // Detect graduations (migrations) for open positions
-    const completeLogs = await withRetry(() => provider.getLogs({
-      fromBlock: lastPolledBlock + 1,
-      toBlock: current,
-      topics: [curveCompleteTopic]
-    }));
-    for (const log of completeLogs) {
-      const token = '0x' + log.topics[1].slice(-40);
-      const pos = positions.find(p => p.token.toLowerCase() === token.toLowerCase());
-      if (pos && !pos.isMigrated) {
-        pos.isMigrated = true;
-        logger.info(`[GRADUATED] ${token} moved to DEX`);
-        await sendTg(`🔄 ${token} graduated - will sell on DEX`);
+    try {
+      const completeLogs = await withRetry(() => provider.getLogs({
+        fromBlock,
+        toBlock: current,
+        topics: [curveCompleteTopic]
+      }), 2, 12000) || [];
+      for (const log of completeLogs) {
+        const token = '0x' + log.topics[1].slice(-40);
+        const pos = positions.find(p => ((p.token || p.curve) || '').toLowerCase() === token.toLowerCase());
+        if (pos && !pos.isMigrated) {
+          pos.isMigrated = true;
+          logger.info(`[GRADUATED] ${token} moved to DEX`);
+          sendTg(`🔄 ${token} graduated - will sell on DEX`).catch(()=>{});
+        }
       }
+    } catch (e) {
+      logger.debug('graduation logs error: ' + (e.message||e));
     }
 
-    lastPolledBlock = current;
+    lastPolledBlock = current;   // always advance to avoid re-scanning forever
   } catch (e) {
-    if (!String(e.message || e).includes('ENS')) {
-      logger.warn('Poll error: ' + (e.message || e));
+    const msg = (e && (e.message || e.stack || e)) || 'unknown';
+    if (!String(msg).includes('ENS')) {
+      logger.warn('Poll error: ' + msg);
     }
-    await new Promise(r => setTimeout(r, 700));
+    // On persistent error, still advance a bit so we don't get stuck on bad block
+    if (lastPolledBlock > 0) lastPolledBlock += 5;
+  } finally {
+    pollingInProgress = false;
   }
 }
 
@@ -1779,14 +1891,14 @@ async function main() {
   logger.info(`Wallet: ${wallet.address}`);
   logger.info(`Focus: fun.noxa.fi/robinhood bonding curves`);
 
-  // Real output diagnostics
+  // Real output diagnostics (with timeout so startup doesn't hang)
   try {
-    const net = await provider.getNetwork();
-    const block = await provider.getBlockNumber();
+    const net = await withTimeout(provider.getNetwork(), 8000, 'getNetwork');
+    const block = await withTimeout(provider.getBlockNumber(), 8000, 'getBlock');
     logger.info(`Chain ID: ${net.chainId} | Current block: ${block}`);
     logger.info(`RPC: ${RPC}`);
   } catch (e) {
-    logger.warn('RPC check issue: ' + e.message);
+    logger.warn('RPC check issue (continuing anyway): ' + (e.message || e));
   }
 
   if (!FACTORY || FACTORY.includes('REPLACE')) {
@@ -1798,21 +1910,40 @@ async function main() {
   loadPositions();
   await initTelegram();
 
-  await pollNewLaunches();
+  // First poll with safety
+  try { await withTimeout(pollNewLaunches(), 30000, 'initial poll'); } catch (e) { logger.warn('initial poll issue: ' + e.message); }
 
-  setInterval(pollNewLaunches, POLL_MS);
+  // Use the possibly runtime-tuned POLL_MS
+  const pollInterval = globalThis.POLL_MS || POLL_MS || 2000;
+  setInterval(pollNewLaunches, pollInterval);
   setInterval(monitorPositions, 4500);
 
+  logger.info(`Intervals started: poll every ${pollInterval}ms, monitor every 4500ms (with overlap guards)`);
+
   setInterval(async () => {
-    const bal = await getBalance();
-    const balEth = parseFloat(ethers.formatEther(bal));
-    logger.info(`[HEARTBEAT] ${positions.length} positions | Bal: ${balEth.toFixed(4)} ETH`);
-    if (balEth < 0.01) {
-      await sendAlert(`⚠️ Low balance: ${balEth.toFixed(4)} ETH`);
+    try {
+      const bal = await getBalance();
+      const balEth = parseFloat(ethers.formatEther(bal));
+      logger.info(`[HEARTBEAT] ${positions.length} positions | Bal: ${balEth.toFixed(4)} ETH`);
+      if (balEth < 0.01) {
+        sendAlert(`⚠️ Low balance: ${balEth.toFixed(4)} ETH`).catch(() => {});
+      }
+      // Fire and forget to avoid blocking the interval if TG is slow
+      sendTg(`❤️ Heartbeat | Pos: ${positions.length} | Bal: ${balEth.toFixed(4)} ETH`).catch(() => {});
+      savePositions();
+    } catch (hbErr) {
+      logger.debug('heartbeat error: ' + (hbErr.message || hbErr));
     }
-    await sendTg(`❤️ Heartbeat | Pos: ${positions.length} | Bal: ${balEth.toFixed(4)} ETH`);
-    savePositions();
   }, 90000);
+
+  // Global safety nets so one bad promise/RPC doesn't kill the whole bot
+  process.on('unhandledRejection', (reason) => {
+    logger.warn('UnhandledRejection (kept alive): ' + (reason && (reason.message || reason)));
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error('UncaughtException (will try to continue): ' + (err && (err.message || err)));
+    // Do not exit - let PM2 or user restart if truly dead
+  });
 
   process.on('SIGINT', () => {
     logger.info('Shutting down...');
@@ -1820,7 +1951,7 @@ async function main() {
     process.exit(0);
   });
 
-  logger.info('Bot running. Press Ctrl+C to stop.');
+  logger.info('Bot running. Press Ctrl+C to stop. (anti-stuck guards + timeouts active)');
 }
 
-main().catch(e => { logger.error(e); process.exit(1); });
+main().catch(e => { logger.error('main fatal: ' + e); /* do not always exit */ });

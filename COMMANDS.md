@@ -136,6 +136,7 @@ From the bot chat:
 - `/p` or `/positions` → list with sold amounts + individual sell buttons
 - `/sa` or `/sellall`
 - `/poll` → forces poll, shows if new launches found
+- `/resetpoll` or `/unstuck` → clears poll state + forces fresh scan (use when bot appears frozen / no heartbeats)
 - `/r` or `/recent` → recent detected tokens + buy buttons
 - `/bal` → balance
 - `/d` or `/diag` or `/info` → **Real diagnostics** (current block, balance, snipe size, factory status, live data, RPC)
