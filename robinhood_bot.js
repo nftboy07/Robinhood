@@ -237,7 +237,6 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
         await telegramBot.sendMessage(msg.chat.id, helpText);
       } else if (text === '/recent' || text === '/r') {
         // Trigger recent handler
-        // Simulate callback or duplicate logic
         if (recentLaunches.length === 0) {
           await telegramBot.sendMessage(msg.chat.id, 'No recent launches yet.');
         } else {
@@ -252,6 +251,19 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
           });
           await telegramBot.sendMessage(msg.chat.id, txt, { parse_mode: 'HTML', reply_markup: kbd });
         }
+      } else if (text.startsWith('/buy ')) {
+        // Manual buy: /buy 0.005 0xaddr
+        const parts = text.split(' ');
+        if (parts.length >= 3) {
+          const amt = parts[1];
+          const addr = parts[2];
+          await buyToken(addr, amt);
+        } else {
+          await telegramBot.sendMessage(msg.chat.id, 'Usage: /buy <amount> <address>');
+        }
+      } else if (text === '/bal' || text === '/balance') {
+        const bal = await getBalance();
+        await telegramBot.sendMessage(msg.chat.id, `Balance: ${ethers.formatEther(bal)} ETH`);
       }
     });
 
@@ -1037,8 +1049,13 @@ async function main() {
   setInterval(monitorPositions, 4500);
 
   setInterval(async () => {
-    logger.info(`[HEARTBEAT] ${positions.length} positions`);
-    await sendTg(`❤️ Heartbeat | Positions: ${positions.length}`);
+    const bal = await getBalance();
+    const balEth = parseFloat(ethers.formatEther(bal));
+    logger.info(`[HEARTBEAT] ${positions.length} positions | Bal: ${balEth.toFixed(4)} ETH`);
+    if (balEth < 0.01) {
+      await sendAlert(`⚠️ Low balance: ${balEth.toFixed(4)} ETH`);
+    }
+    await sendTg(`❤️ Heartbeat | Pos: ${positions.length} | Bal: ${balEth.toFixed(4)} ETH`);
     savePositions();
   }, 90000);
 
