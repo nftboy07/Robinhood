@@ -42,11 +42,26 @@ echo "Bot should now be running LIVE MAINNET with no dry-run code path at all."
 # pm2 start ecosystem.config.js --update-env
 # pm2 save
 
-# Recommended next:
-# 1. Set real factory etc in config.json
-# 2. Run node tg_diag.js to test TG
-# 3. Fund wallet (printed on start)
-# 4. /menu in TG, /poll to force scan, wait for launches on fun.noxa.fi/robinhood
-# 5. Watch for auto snipe + buttons + tx links
+# Recommended next (copy paste these for real output):
+# 1. Set real factory etc in config.json (use node discover.js or node vps_diag.js)
+nano config.json
+
+# 2. Test TG and get real diagnostics
+node tg_diag.js
+node vps_diag.js
+
+# 3. Restart
+pm2 restart robinhood-sniper --update-env
+
+# 4. In TG send:
+# /menu
+# /d   or /diag   <--- gives current block, balance, factory status etc (real output)
+# /poll
+
+# 5. Fund wallet (address printed in logs or /s)
+# 6. Watch for launches or use /poll
+
+# Full one-liner check after pull:
+# cd ~/robinhood-bot && git pull && npm i --prod && pm2 restart robinhood-sniper --update-env && node vps_diag.js
 
 # Monitor first real activity and report back logs or tx if wanted.
