@@ -103,7 +103,7 @@ Test thoroughly on small amounts. Monitor first trades manually.
 | Average block time     | ~0.1s (very fast)                          |
 | Notes                  | Arbitrum Orbit L2 by Robinhood. FCFS sequencing. Uniswap live. |
 
-**Testnet**: Chain ID 46630, RPC https://rpc.testnet.chain.robinhood.com (use for testing if available).
+**Testnet**: (Not used - you only run mainnet live.) Chain ID 46630 info kept for reference only.
 
 ## How to Get the Critical Contract Addresses (MUST DO)
 
