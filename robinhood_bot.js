@@ -51,6 +51,7 @@ try {
 if (argv.amount) config.snipeAmountEth = argv.amount;
 
 const RPC = config.rpc || 'https://rpc.mainnet.chain.robinhood.com';
+const RPCS = (config.rpcs && Array.isArray(config.rpcs) && config.rpcs.length > 0) ? config.rpcs : [RPC];
 const PRIVATE_KEY = process.env.PK || '';
 const TG_TOKEN = process.env.TELEGRAM_TOKEN || process.env.BOT_TOKEN || process.env.TG_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '';
 const TG_CHAT = process.env.ADMIN_CHAT_ID || process.env.TELEGRAM_CHAT_ID || process.env.TG_CHAT_ID || process.env.TELEGRAM_CHAT_ID || '';
@@ -101,8 +102,10 @@ const SNIPE_AMOUNT = ethers.parseEther( String(config.snipeAmountEth || '0.0001'
 
 // ====================== PROVIDER & WALLET ======================
 // Custom chain 4663 - static network to avoid ENS lookups and errors
+// Support backup RPCs (add to config.json "rpcs": ["primary", "backup..."]) for reliability
 const network = new ethers.Network('robinhood', 4663);
-const provider = new ethers.JsonRpcProvider(RPC, network, { staticNetwork: network });
+const providerList = RPCS.map(rpc => new ethers.JsonRpcProvider(rpc, network, { staticNetwork: network }));
+const provider = new ethers.FallbackProvider(providerList, 1);  // use first healthy provider
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 // ====================== LOGGING ======================
@@ -967,7 +970,8 @@ async function buyToken(curveAddress, amountStr) {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    const balBefore = await getTokenBalance(curveAddress, wallet.address);
+    let tokenForBal = curveAddress;
+    const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
     let minOut = 0n;
     let gasEst = 300000n;
@@ -990,9 +994,16 @@ async function buyToken(curveAddress, amountStr) {
     // Use log parsing first for real received amount (curve vs token mismatch safe)
     const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
     const fromLog = rec.amount;
-    const actualToken = rec.token || curveAddress;
+    let actualToken = rec.token || curveAddress;
     const balAfter = await getTokenBalance(actualToken, wallet.address);
     let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
+    if (amount === 0n) {
+      // Strong fallback for new tokens: post-buy balance on the discovered token is the received amount
+      const postBal = await getTokenBalance(actualToken, wallet.address);
+      if (postBal > 0n) {
+        amount = postBal;
+      }
+    }
     if (amount === 0n) {
       logger.warn(`[BUY] No tokens received for ${curveAddress}`);
       await sendTg(`⚠️ Buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
@@ -1044,7 +1055,8 @@ async function forceBuy(curveAddress, amountStr) {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    const balBefore = await getTokenBalance(curveAddress, wallet.address);
+    let tokenForBal = curveAddress;
+    const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
     let minOut = 0n;
     let gasEst = 300000n;
@@ -1066,9 +1078,15 @@ async function forceBuy(curveAddress, amountStr) {
 
     const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
     const fromLog = rec.amount;
-    const actualToken = rec.token || curveAddress;
+    let actualToken = rec.token || curveAddress;
     const balAfter = await getTokenBalance(actualToken, wallet.address);
     let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
+    if (amount === 0n) {
+      const postBal = await getTokenBalance(actualToken, wallet.address);
+      if (postBal > 0n) {
+        amount = postBal;
+      }
+    }
     if (amount === 0n) {
       logger.warn(`[FORCE BUY] No tokens received for ${curveAddress}`);
       await sendTg(`⚠️ Force buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
@@ -1488,7 +1506,8 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    const balBefore = await getTokenBalance(curveAddress, wallet.address);
+    let tokenForBal = tokenAddr || curveAddress;
+    const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
     const tx = await curve.buy(minOut, wallet.address, {
       value: SNIPE_AMOUNT,
@@ -1503,9 +1522,15 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
 
     const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
     const fromLog = rec.amount;
-    const actualToken = rec.token || curveAddress;
+    let actualToken = rec.token || tokenAddr || curveAddress;
     const balAfter = await getTokenBalance(actualToken, wallet.address);
     let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : (estimated || 0n));
+    if (amount === 0n) {
+      const postBal = await getTokenBalance(actualToken, wallet.address);
+      if (postBal > 0n) {
+        amount = postBal;
+      }
+    }
     if (amount === 0n) {
       logger.warn(`[SNIPE] No tokens received for ${curveAddress}`);
       await sendTg(`⚠️ Snipe tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
@@ -1902,7 +1927,7 @@ async function main() {
     const net = await withTimeout(provider.getNetwork(), 8000, 'getNetwork');
     const block = await withTimeout(provider.getBlockNumber(), 8000, 'getBlock');
     logger.info(`Chain ID: ${net.chainId} | Current block: ${block}`);
-    logger.info(`RPC: ${RPC}`);
+    logger.info(`RPCs (with FallbackProvider): ${RPCS.join(', ')}`);
   } catch (e) {
     logger.warn('RPC check issue (continuing anyway): ' + (e.message || e));
   }
