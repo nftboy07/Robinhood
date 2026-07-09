@@ -138,6 +138,7 @@ From the bot chat:
 - `/poll` → forces poll, shows if new launches found
 - `/r` or `/recent` → recent detected tokens + buy buttons
 - `/bal` → balance
+- `/d` or `/diag` or `/info` → **Real diagnostics** (current block, balance, snipe size, factory status, live data)
 - `/buy 0.0001 0xTHE_TOKEN_ADDRESS` → manual buy (use real address from discovery)
 - `/pause` / `/resume`
 

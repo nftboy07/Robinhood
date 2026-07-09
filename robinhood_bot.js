@@ -187,6 +187,9 @@ async function initTelegram() {
               { text: '🧪 Test Buy', callback_data: 'test_buy' }
             ],
             [
+              { text: '🔍 Diag', callback_data: 'diag' }
+            ],
+            [
               { text: pauseText, callback_data: 'toggle_pause' },
               { text: '⚙️ Config', callback_data: 'config' }
             ],
@@ -240,9 +243,12 @@ async function initTelegram() {
  /menu or /m - Main menu
  /s or /status - Status
  /p or /positions - Positions
+ /d or /diag - Real diagnostics (block, bal, config)
  /sa or /sellall - Sell all
  /poll - Force poll
  /recent or /r - Recent launches
+ /bal - Balance
+ /buy <amt> <addr> - Manual buy
  /help or /h - This help
 
 Use buttons for fast actions. New launches auto-post buy buttons.`;
@@ -276,6 +282,8 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
       } else if (text === '/bal' || text === '/balance') {
         const bal = await getBalance();
         await telegramBot.sendMessage(msg.chat.id, `Balance: ${ethers.formatEther(bal)} ETH`);
+      } else if (text === '/diag' || text === '/d' || text === '/info') {
+        await handleDiag(msg.chat.id);
       } else if (text === '/pause') {
         isPaused = true;
         await sendTg('⏸️ Sniping paused');
@@ -364,6 +372,8 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
         const testAddr = '0x0000000000000000000000000000000000000000'; // dummy for test
         await sendBuyMenu(testAddr, 'TEST TOKEN');
         await telegramBot.sendMessage(chatId, 'This is a test menu. Real launches will use actual addresses and names from fun.noxa.fi.');
+      } else if (data === 'diag') {
+        await handleDiag(chatId);
       } else if (data === 'toggle_pause') {
         isPaused = !isPaused;
         await sendTg(isPaused ? '⏸️ Sniping paused' : '▶️ Sniping resumed');
@@ -551,6 +561,38 @@ async function handlePositions(chatId) {
     ])
   };
   await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard });
+}
+
+async function handleDiag(chatId) {
+  try {
+    const bal = await getBalance();
+    const balEth = ethers.formatEther(bal);
+    const block = await provider.getBlockNumber().catch(() => 'N/A');
+    const posCount = positions.length;
+    const snipe = ethers.formatEther(SNIPE_AMOUNT);
+    const paused = isPaused ? 'PAUSED' : 'RUNNING';
+    const factoryStatus = (FACTORY && !FACTORY.includes('REPLACE')) ? 'SET' : 'BROAD SCAN (run discover.js)';
+    
+    const text = `🔍 <b>DIAG - Real Output</b>\n` +
+      `Mode: LIVE MAINNET\n` +
+      `Status: ${paused}\n` +
+      `Wallet: <code>${wallet.address}</code>\n` +
+      `Balance: ${balEth} ETH\n` +
+      `Current Block: ${block}\n` +
+      `Snipe Amount: ${snipe} ETH\n` +
+      `Positions: ${posCount}\n` +
+      `Factory: ${factoryStatus}\n` +
+      `Poll Interval: ${POLL_MS}ms\n` +
+      `Strategy Moonbag: ${STRATEGY.moonbagPct || 25}%\n` +
+      `Time: ${new Date().toISOString()}`;
+    
+    await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+    
+    // Also log real data
+    logger.info(`[DIAG] Bal:${balEth} Block:${block} Pos:${posCount}`);
+  } catch (e) {
+    await telegramBot.sendMessage(chatId, `Diag error: ${e.message}`);
+  }
 }
 
 // Per-position sell buttons are handled inside the main callback_query above.
