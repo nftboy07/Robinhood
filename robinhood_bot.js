@@ -209,6 +209,7 @@ async function initTelegram() {
             ['/r', '/poll', '/d'],
             ['/gas', '/pnl', '/holdings'],
             ['/check', '/snipe', '/refresh'],
+            ['/spent', '/config', '/stats'],
             ['/menu']
           ],
           resize_keyboard: true,
@@ -263,6 +264,9 @@ async function initTelegram() {
  /spent - Total est spent ETH
  /received - Total est tokens
  /sellmoon - Sell moonbag portions
+ /config - Full config
+ /stats - Stats (trades, PnL, block)
+ /estimate <addr> [amt] - Simulate buy output
  /gas /fees - Live gas & costs
  /price <addr> - Price query
  /pnl - PnL
@@ -465,6 +469,38 @@ All real mainnet + links.`;
         }
         savePositions();
         await handlePositions(msg.chat.id);
+      } else if (text === '/config') {
+        const cfgText = `⚙️ Config (runtime + file):\n` +
+          `RPC: ${RPC}\n` +
+          `Factory: ${FACTORY || globalThis.FACTORY_OVERRIDE || 'BROAD'}\n` +
+          `Snipe: ${ethers.formatEther(SNIPE_AMOUNT)} ETH\n` +
+          `SL: ${STOP_LOSS*100}% | Moon: ${STRATEGY.moonbagPct}% | Re: ${STRATEGY.reEntryDipPct}%x${STRATEGY.maxReEntriesPerPosition}\n` +
+          `GasMult: ${globalThis.GAS_MULT || GAS_MULT} | Poll: ${globalThis.POLL_MS || POLL_MS}ms\n` +
+          `Honeypot: ${HONEYPOT_CHECK}\n` +
+          `Positions: ${positions.length} | Paused: ${isPaused}`;
+        await telegramBot.sendMessage(msg.chat.id, cfgText);
+      } else if (text === '/stats') {
+        const statsText = `📈 Stats (Mainnet):\n` +
+          `Daily trades: ${dailyStats.trades}\n` +
+          `Realized PnL: ${dailyStats.realizedPnl.toFixed(6)} ETH\n` +
+          `Positions: ${positions.length}\n` +
+          `Last block: ${await provider.getBlockNumber().catch(()=> '?')}\n` +
+          `Uptime: running`;
+        await telegramBot.sendMessage(msg.chat.id, statsText);
+      } else if (text.startsWith('/estimate ')) {
+        const parts = text.split(' ');
+        const addr = parts[1];
+        const amtStr = parts[2] || '0.0001';
+        if (addr && addr.startsWith('0x')) {
+          const amt = ethers.parseEther(amtStr);
+          const est = await estimateBuyOutput(addr, amt);
+          const price = await getCurrentPrice(addr);
+          await telegramBot.sendMessage(msg.chat.id, `📊 Estimate for ${amtStr} ETH on ${addr}:\nTokens: ${ethers.formatEther(est || 0n)}\nPrice: ${ethers.formatEther(price)}\n<a href="${EXPLORER}/address/${addr}">Explorer</a>`);
+        } else {
+          await sendTg('Usage: /estimate <addr> [amt]');
+        }
+      } else if (text === '/reentry' || text === '/re') {
+        await sendTg(`Re-entry: ${STRATEGY.reEntryDipPct || 30}% dip, max ${STRATEGY.maxReEntriesPerPosition || 2}`);
       } else if (text === '/gas' || text === '/fees') {
         const feeData = await provider.getFeeData();
         const gasPrice = feeData.gasPrice ? ethers.formatUnits(feeData.gasPrice, 'gwei') : 'N/A';
