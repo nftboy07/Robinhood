@@ -207,6 +207,7 @@ async function initTelegram() {
           keyboard: [
             ['/s', '/p', '/sa'],
             ['/r', '/poll', '/d'],
+            ['/gas', '/pnl', '/holdings'],
             ['/menu']
           ],
           resize_keyboard: true,
@@ -245,20 +246,24 @@ async function initTelegram() {
  /s or /status - Status
  /p or /positions - Positions (with sell buttons)
  /d or /diag - Real diagnostics (block, bal, config)
- /sa or /sellall - Sell all positions
- /sell <n> - Sell full position n (from /p)
- /sellp <n> <pct> - Sell pct% of position n
- /selladdr <addr> <pct> - Sell pct% of token at addr
+ /sa or /sellall - Sell all
+ /sell <n> - Sell full pos n
+ /sellp <n> <pct> - Partial sell
+ /selladdr <addr> <pct> - Sell by addr
+ /gas /fees - Live gas prices & est costs
+ /price <addr> - Current price for addr
+ /pnl - Portfolio PnL estimate
+ /holdings /tokens - Wallet token balances
+ /last - Last launch
+ /strategy - Auto sell strategy
  /poll - Force poll
- /recent or /r - Recent launches
+ /recent /r - Recent
  /bal - Balance
- /strategy - Show auto selling strategy
- /buy <amt> <addr> - Manual buy (with checks)
- /forcebuy <amt> <addr> - Force buy (bypass, for reverts)
- /setfactory 0x... - Set factory at runtime
- /help or /h - This help
+ /buy /forcebuy - Manual buys
+ /setfactory 0x... 
+ /help /h
 
-Use buttons for fast actions. New launches auto-post buy buttons.`;
+All outputs use real mainnet data + explorer links.`;
         await telegramBot.sendMessage(msg.chat.id, helpText);
       } else if (text === '/recent' || text === '/r') {
         // Trigger recent handler
@@ -348,6 +353,60 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
       } else if (text === '/resume' || text === '/unpause') {
         isPaused = false;
         await sendTg('▶️ Sniping resumed');
+      } else if (text === '/gas' || text === '/fees') {
+        const feeData = await provider.getFeeData();
+        const gasPrice = feeData.gasPrice ? ethers.formatUnits(feeData.gasPrice, 'gwei') : 'N/A';
+        const maxFee = feeData.maxFeePerGas ? ethers.formatUnits(feeData.maxFeePerGas, 'gwei') : 'N/A';
+        const prio = feeData.maxPriorityFeePerGas ? ethers.formatUnits(feeData.maxPriorityFeePerGas, 'gwei') : 'N/A';
+        const estBuyGas = 300000;
+        const estSellGas = 550000;
+        const buyCost = feeData.gasPrice ? (Number(ethers.formatUnits(feeData.gasPrice, 'ether')) * estBuyGas * 1.5).toFixed(6) : 'N/A';
+        const sellCost = feeData.gasPrice ? (Number(ethers.formatUnits(feeData.gasPrice, 'ether')) * estSellGas * 1.5).toFixed(6) : 'N/A';
+        await telegramBot.sendMessage(msg.chat.id, `⛽ <b>Gas (Mainnet)</b>\nGas Price: ${gasPrice} gwei\nMax Fee: ${maxFee} gwei\nPriority: ${prio} gwei\nEst Buy (0.0001): ~${buyCost} ETH\nEst Sell: ~${sellCost} ETH\nBlock: ${await provider.getBlockNumber().catch(()=>'?')}`);
+      } else if (text.startsWith('/price ')) {
+        const addr = text.split(' ')[1];
+        if (addr && addr.startsWith('0x')) {
+          const price = await getCurrentPrice(addr);
+          const bal = await getBalance();
+          const estTokens = price > 0 ? (SNIPE_AMOUNT * (10n**18n)) / price : 0n;
+          await telegramBot.sendMessage(msg.chat.id, `💰 Price for ${addr}:\n${ethers.formatEther(price)} (units)\nEst tokens for 0.0001 ETH: ${ethers.formatEther(estTokens)}\n<a href="${EXPLORER}/address/${addr}">Explorer</a>`);
+        } else {
+          await telegramBot.sendMessage(msg.chat.id, 'Usage: /price 0xaddr');
+        }
+      } else if (text === '/pnl' || text === '/profit') {
+        let totalRealized = 0;
+        let totalUnreal = 0;
+        let totalSpent = 0;
+        for (const p of positions) {
+          totalSpent += Number(ethers.formatEther(p.entryPrice || 0n)) * (Number(ethers.formatEther(p.amount || 0n)) / 1e18); // rough
+          const currP = await getCurrentPrice(p.token);
+          const pnlPct = (p.entryPrice > 0n && currP > 0n) ? ((Number(currP) - Number(p.entryPrice)) / Number(p.entryPrice)) * 100 : 0;
+          const unreal = Number(ethers.formatEther(p.amount || 0n)) * (pnlPct / 100);
+          totalUnreal += unreal;
+          // realized from sold would need tracking, approx 0 for now
+        }
+        const bal = await getBalance();
+        await telegramBot.sendMessage(msg.chat.id, `📊 <b>PnL (Mainnet)</b>\nPositions: ${positions.length}\nUnrealized PnL: ~${totalUnreal.toFixed(6)} ETH\nEst Total Spent: ~${totalSpent.toFixed(4)} ETH\nCurrent Bal: ${ethers.formatEther(bal)} ETH\n(Realized tracked in dailyStats)`);
+      } else if (text === '/holdings' || text === '/tokens') {
+        let out = '🪙 <b>Holdings (Mainnet)</b>\n';
+        const addrs = [...new Set(positions.map(p => p.token).concat(recentLaunches.map(l => l.addr)))];
+        for (const a of addrs.slice(0,5)) {
+          try {
+            const erc = new ethers.Contract(a, ["function balanceOf(address) view returns (uint256)","function symbol() view returns (string)"], provider);
+            const b = await erc.balanceOf(wallet.address);
+            const sym = await erc.symbol().catch(() => '???');
+            if (b > 0n) out += `${sym}: ${ethers.formatEther(b)} @ <code>${a}</code>\n`;
+          } catch {}
+        }
+        out += `Native: ${ethers.formatEther(await getBalance())} ETH\n<a href="${EXPLORER}/address/${wallet.address}">Wallet</a>`;
+        await telegramBot.sendMessage(msg.chat.id, out);
+      } else if (text === '/last' || text === '/lastlaunch') {
+        if (recentLaunches.length > 0) {
+          const l = recentLaunches[0];
+          await telegramBot.sendMessage(msg.chat.id, `🆕 Last Launch:\n${l.symbol}\n<code>${l.addr}</code>\n${Math.floor((Date.now()-l.time)/1000)}s ago\n<a href="${EXPLORER}/address/${l.addr}">Explorer</a>`);
+        } else {
+          await telegramBot.sendMessage(msg.chat.id, 'No recent launches tracked.');
+        }
       }
     });
 
