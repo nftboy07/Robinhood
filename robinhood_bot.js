@@ -77,6 +77,8 @@ const GAS_MULT = config.gasMultiplier || 1.8;
 const MAX_POS = config.maxConcurrentPositions || 8;
 const POSITIONS_FILE = config.positionsFile || 'positions.json';
 
+const EXPLORER = 'https://robinhoodchain.blockscout.com';
+
 // New risk & safety settings (fun.noxa.fi focus)
 const HONEYPOT_CHECK = config.honeypotCheck !== false;
 const MAX_DAILY_LOSS_PCT = config.maxDailyLossPct ?? 25;
@@ -95,7 +97,7 @@ const STRATEGY = config.strategy || {
   moonbagPct: 25
 };
 
-const SNIPE_AMOUNT = ethers.parseEther('0.0001'); // fixed tiny entry - mainnet live
+const SNIPE_AMOUNT = ethers.parseEther( String(config.snipeAmountEth || '0.0001') ); // configurable, default tiny 0.0001 ETH - mainnet live
 
 // ====================== PROVIDER & WALLET ======================
 // Custom chain 4663 - static network to avoid ENS lookups and errors
@@ -484,9 +486,10 @@ async function buyToken(curveAddress, amountStr) {
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
     const receipt = await tx.wait();
+    const txLink = `${EXPLORER}/tx/${receipt.transactionHash}`;
     logger.info(`[BOUGHT] tx: ${receipt.transactionHash}`);
-    await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${receipt.transactionHash}`);
-    await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${receipt.transactionHash}</code>`);
+    await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${receipt.transactionHash}\n${txLink}`);
+    await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${receipt.transactionHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
 
     // Add to positions (simplified)
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
@@ -526,7 +529,8 @@ async function handleStatus(chatId) {
   const moonbag = STRATEGY.moonbagPct || 25;
   const bal = await getBalance();
   const balEth = ethers.formatEther(bal);
-  const text = `📊 <b>Status</b>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nBalance: ${balEth} ETH\nMode: LIVE MAINNET\nMoonbag: ${moonbag}% held`;
+  const walletLink = `${EXPLORER}/address/${wallet.address}`;
+  const text = `📊 <b>Status</b>\nWallet: <a href="${walletLink}">${wallet.address}</a>\nPositions: ${pos}\nDaily trades: ${dailyStats.trades}\nPnL: ${dailyPnl} ETH\nBalance: ${balEth} ETH\nMode: LIVE MAINNET\nMoonbag: ${moonbag}% held`;
   await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML' });
 }
 
@@ -537,11 +541,13 @@ async function handlePositions(chatId) {
   }
   let text = '📍 <b>Open Positions</b>\n';
   positions.forEach((p, i) => {
-    text += `${i+1}. ${p.symbol} | Entry: ${ethers.formatEther(p.entryPrice)}\n`;
+    const entry = ethers.formatEther(p.entryPrice);
+    const sold = p.soldAmount ? ethers.formatEther(p.soldAmount) : '0';
+    text += `${i+1}. ${p.symbol}\n   Entry: ${entry} | Sold: ${sold} | Re-entries: ${p.reEntries || 0}\n`;
   });
   const keyboard = {
     inline_keyboard: positions.map((p, i) => [
-      { text: `💸 Sell ${p.symbol}`, callback_data: `sell_${i}` }
+      { text: `💸 Sell #${i+1} ${p.symbol.slice(0,10)}`, callback_data: `sell_${i}` }
     ])
   };
   await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard });
@@ -777,7 +783,9 @@ async function snipe(curveAddress, symbol) {
     dailyStats.trades++;
     savePositions();
 
-    await sendTg(`✅ Bought <b>${symbol}</b> on fun.noxa.fi/robinhood\nEst. amount: ${ethers.formatEther(amount)}`);
+    const txLink = `${EXPLORER}/tx/${receipt.transactionHash}`;
+    await sendTg(`✅ Bought <b>${symbol}</b> on fun.noxa.fi/robinhood\nEst. amount: ${ethers.formatEther(amount)}\n<a href="${txLink}">View tx</a>`);
+    await sendAlert(`✅ Snipe bought ${symbol}\n${txLink}`);
   } catch (e) {
     logger.error(`[SNIPE FAIL] ${symbol}: ${e.message}`);
     await sendTg(`❌ Snipe failed ${symbol}`);
@@ -1048,7 +1056,8 @@ async function main() {
   console.log('=== ROBINHOOD CHAIN SNIPER - fun.noxa.fi/robinhood (LIVE MAINNET) ===');
   logger.info(`Wallet: ${wallet.address}`);
   logger.info(`Mode: LIVE MAINNET ONLY (experienced user)`);
-  logger.info(`Snipe size: ${ethers.formatEther(SNIPE_AMOUNT)} ETH`);
+  logger.info(`Snipe size: ${ethers.formatEther(SNIPE_AMOUNT)} ETH (from config or default)`);
+  logger.info(`Wallet: ${wallet.address}`);
   logger.info(`Focus: fun.noxa.fi/robinhood bonding curves`);
 
   loadPositions();

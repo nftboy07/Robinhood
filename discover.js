@@ -93,6 +93,37 @@ async function findRecentLaunches() {
   console.log('4. Paste the "to" address of the main tx into config.json as "factory".');
   console.log('5. For WETH/Router: find any graduated token on the site and inspect its pair.');
   console.log('\nOnce you have addresses, update config.json (factory/weth/router) and run the LIVE bot on mainnet.');
+
+  // Bonus: print a ready config snippet you can copy into config.json
+  console.log('\n=== READY CONFIG SNIPPET (copy/edit into config.json) ===');
+  console.log(JSON.stringify({
+    rpc: "https://rpc.mainnet.chain.robinhood.com",
+    factory: "0xREPLACE_WITH_DISCOVERED_FACTORY",
+    weth: "0xREPLACE_WITH_WETH",
+    router: "0xREPLACE_WITH_ROUTER",
+    snipeAmountEth: "0.0001",
+    stopLossPct: 0.20,
+    takeProfitPct: 1.0,
+    trailingStopPct: 0.25,
+    pollIntervalMs: 800,
+    gasMultiplier: 2.0,
+    logLevel: "info",
+    honeypotCheck: true,
+    maxDailyLossPct: 5,
+    maxTradesPerHour: 20,
+    slippagePct: 10,
+    enableTelegram: true,
+    strategy: {
+      tpLadder: [0.5, 1.0, 2.0],
+      tpSellPercents: [30, 30, 40],
+      reEntryOnDip: true,
+      reEntryDipPct: 0.30,
+      reEntryAmountEth: "0.00005",
+      maxReEntriesPerPosition: 2,
+      moonbagPct: 25
+    }
+  }, null, 2));
+  console.log('\nReplace the 0xREPLACE_ values with real ones, then git pull + pm2 restart on VPS.');
 }
 
 findRecentLaunches().catch(console.error);
