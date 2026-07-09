@@ -393,13 +393,16 @@ All outputs use real mainnet data + explorer links.`;
       } else if (text === '/holdings' || text === '/tokens') {
         let out = '🪙 <b>Holdings (Mainnet)</b>\n';
         const addrs = [...new Set(positions.map(p => p.token).concat(recentLaunches.map(l => l.addr)))];
-        for (const a of addrs.slice(0,5)) {
+        for (const a of addrs.slice(0,8)) {
           try {
             const erc = new ethers.Contract(a, ["function balanceOf(address) view returns (uint256)","function symbol() view returns (string)"], provider);
             const b = await erc.balanceOf(wallet.address);
-            const sym = await erc.symbol().catch(() => '???');
-            if (b > 0n) out += `${sym}: ${ethers.formatEther(b)} @ <code>${a}</code>\n`;
-          } catch {}
+            let sym = '???';
+            try { sym = await erc.symbol(); } catch { 
+              const info = await getTokenInfo(a); sym = info.symbol || '???'; 
+            }
+            out += `${sym}: ${ethers.formatEther(b)} @ <code>${a}</code>\n`;
+          } catch (e) { out += `Addr ${a}: query failed\n`; }
         }
         out += `Native: ${ethers.formatEther(await getBalance())} ETH\n<a href="${EXPLORER}/address/${wallet.address}">Wallet</a>`;
         await telegramBot.sendMessage(msg.chat.id, out);
