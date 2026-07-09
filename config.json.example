@@ -1,6 +1,17 @@
 {
   "rpc": "https://rpc.mainnet.chain.robinhood.com",
   "ws": "wss://rpc.mainnet.chain.robinhood.com/ws",
+  // Multiple public / free-tier RPCs for redundancy and to avoid rate limits (429/502).
+  // The bot uses ethers FallbackProvider to automatically switch to a healthy one.
+  // Only the official public one is truly keyless. For better reliability sign up for free keys:
+  // - Alchemy: free tier at alchemy.com (create Robinhood Chain app)
+  // - QuickNode, dRPC, etc. often have free credits for new users.
+  "rpcs": [
+    "https://rpc.mainnet.chain.robinhood.com",
+    // Add your keys below for production use (uncomment and fill):
+    // "https://robinhood-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY_HERE",
+    // "https://YOUR_QUICKNODE_ROBINHOOD_ENDPOINT_HERE"
+  ],
   "chainId": 4663,
   "factory": "0xREPLACE_WITH_ACTUAL_NOXA_FACTORY_FROM_DISCOVERY",
   "weth": "0xREPLACE_WITH_ACTUAL_WETH",
