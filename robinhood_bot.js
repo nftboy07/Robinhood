@@ -29,6 +29,8 @@ const { ethers } = require('ethers');
 const winston = require('winston');
 const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
+const db = require('./db_manager');
+const MempoolMonitor = require('./mempool_monitor');
 
 // ====================== CLI ======================
 const argv = yargs(hideBin(process.argv))
@@ -79,8 +81,8 @@ const STOP_LOSS = config.stopLossPct ?? 0.15;
 const TAKE_PROFIT = config.takeProfitPct ?? 0.60;
 const TRAILING = config.trailingStopPct ?? 0.08;
 const POLL_MS = config.pollIntervalMs || 1100;
-const GAS_MULT = config.gasMultiplier || 1.8;
-const MAX_POS = config.maxConcurrentPositions || 8;
+let GAS_MULT = config.gasMultiplier || 1.8;
+let MAX_POS = config.maxConcurrentPositions || 8;
 const POSITIONS_FILE = config.positionsFile || 'positions.json';
 
 const EXPLORER = 'https://robinhoodchain.blockscout.com';
@@ -89,7 +91,7 @@ const EXPLORER = 'https://robinhoodchain.blockscout.com';
 const HONEYPOT_CHECK = config.honeypotCheck !== false;
 const MAX_DAILY_LOSS_PCT = config.maxDailyLossPct ?? 25;
 const MAX_TRADES_PER_HOUR = config.maxTradesPerHour ?? 12;
-const SLIPPAGE_PCT = config.slippagePct ?? 15;
+let SLIPPAGE_PCT = config.slippagePct ?? 15;
 const ENABLE_TG = config.enableTelegram !== false;
 
 // Strategy config (safe small amount sniping) - LIVE MAINNET
@@ -103,7 +105,7 @@ const STRATEGY = config.strategy || {
   moonbagPct: 25
 };
 
-const SNIPE_AMOUNT = ethers.parseEther( String(config.snipeAmountEth || '0.0001') ); // configurable, default tiny 0.0001 ETH - mainnet live
+let SNIPE_AMOUNT = ethers.parseEther( String(config.snipeAmountEth || '0.0001') ); // configurable, default tiny 0.0001 ETH - mainnet live
 
 // ====================== PROVIDER & WALLET ======================
 // Custom chain 4663 - static network to avoid ENS lookups and errors
@@ -217,7 +219,7 @@ async function initTelegram() {
             ],
             [
               { text: '🆕 Recent', callback_data: 'recent' },
-              { text: '🔍 Diag', callback_data: 'diag' }
+              { text: '🖥️ Dashboard', callback_data: 'dashboard' }
             ],
             [
               { text: '⛽ Gas/Fees', callback_data: 'gas' },
@@ -253,7 +255,7 @@ async function initTelegram() {
             ['/config', '/block', '/last'],
             ['/refresh', '/check', '/snipe'],
             ['/sellmoon', '/clearpos', '/strategy'],
-            ['/menu']
+            ['/dashboard', '/menu']
           ],
           resize_keyboard: true,
           one_time_keyboard: false
@@ -269,6 +271,8 @@ async function initTelegram() {
 
       if (text === '/start' || text === '/menu' || text === '/m') {
         await sendMainMenu(msg.chat.id);
+      } else if (text === '/dashboard' || text === '/dash') {
+        await handleDashboard(msg.chat.id);
       } else if (text === '/status' || text === '/s') {
         await handleStatus(msg.chat.id);
       } else if (text === '/positions' || text === '/p') {
@@ -298,6 +302,7 @@ async function initTelegram() {
 
 **Main:**
 /menu /m /start - main menu + keyboard
+/dashboard /dash - interactive dashboard + configuration changer
 /s /status - status (wallet, bal, pos, pnl)
 /p /positions - positions list + sell buttons
 /d /diag /info - full diagnostics (block, bal, config, etc)
@@ -802,7 +807,11 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
       } else if (data === 'toggle_pause') {
         isPaused = !isPaused;
         await sendTg(isPaused ? '⏸️ Sniping paused' : '▶️ Sniping resumed');
-        await sendMainMenu(chatId);
+        if (query.message.text && query.message.text.includes('Dashboard')) {
+          await handleDashboardEdit(chatId, query.message.message_id);
+        } else {
+          await sendMainMenu(chatId);
+        }
       } else if (data === 'gas' || data === 'fees') {
         const feeData = await provider.getFeeData();
         const gasPrice = feeData.gasPrice ? ethers.formatUnits(feeData.gasPrice, 'gwei') : 'N/A';
@@ -913,6 +922,30 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
           `Moonbag: ${STRATEGY.moonbagPct || 25}%`;
         await telegramBot.sendMessage(chatId, cfgText);
         await sendMainMenu(chatId);
+      } else if (data === 'dashboard') {
+        await handleDashboard(chatId);
+      } else if (data === 'dash_refresh') {
+        await handleDashboardEdit(chatId, query.message.message_id);
+      } else if (data === 'cfg_snipe_up') {
+        SNIPE_AMOUNT = SNIPE_AMOUNT + ethers.parseEther('0.0001');
+        await handleDashboardEdit(chatId, query.message.message_id);
+      } else if (data === 'cfg_snipe_down') {
+        if (SNIPE_AMOUNT > ethers.parseEther('0.0001')) {
+          SNIPE_AMOUNT = SNIPE_AMOUNT - ethers.parseEther('0.0001');
+        }
+        await handleDashboardEdit(chatId, query.message.message_id);
+      } else if (data === 'cfg_slip_up') {
+        SLIPPAGE_PCT = Math.min(SLIPPAGE_PCT + 5, 95);
+        await handleDashboardEdit(chatId, query.message.message_id);
+      } else if (data === 'cfg_slip_down') {
+        SLIPPAGE_PCT = Math.max(SLIPPAGE_PCT - 5, 1);
+        await handleDashboardEdit(chatId, query.message.message_id);
+      } else if (data === 'cfg_pos_up') {
+        MAX_POS = Math.min(MAX_POS + 1, 50);
+        await handleDashboardEdit(chatId, query.message.message_id);
+      } else if (data === 'cfg_pos_down') {
+        MAX_POS = Math.max(MAX_POS - 1, 1);
+        await handleDashboardEdit(chatId, query.message.message_id);
       }
     });
 
@@ -1415,6 +1448,209 @@ async function estimateBuyOutput(curveAddress, ethAmount) {
     if (price > 0) return (ethAmount * BigInt(10**18)) / price;
     return 0n;
   }
+}
+
+// Render dashboard inside Telegram
+async function handleDashboard(chatId) {
+  const block = await provider.getBlockNumber().catch(() => '?');
+  const bal = await getBalance();
+  const balEth = parseFloat(ethers.formatEther(bal)).toFixed(4);
+  const stats = db.getWinRateStats();
+  const winRateStr = stats.totalTrades > 0 ? `${stats.winRate.toFixed(1)}%` : 'N/A';
+  
+  const text = `🖥️ <b>Robinhood Bot Dashboard</b>\n` +
+    `--------------------------------\n` +
+    `Status: ${isPaused ? '⏸️ PAUSED' : '▶️ RUNNING'}\n` +
+    `Wallet: <code>${wallet.address}</code>\n` +
+    `Balance: <b>${balEth} ETH</b>\n` +
+    `Current Block: ${block}\n\n` +
+    `📈 <b>Performance (All-Time)</b>\n` +
+    `Realized PnL: <b>${stats.totalRealizedPnl.toFixed(6)} ETH</b>\n` +
+    `Total Trades: ${stats.totalTrades} (${stats.wins} W / ${stats.losses} L)\n` +
+    `Win Rate: ${winRateStr}\n\n` +
+    `⚙️ <b>Active Parameters</b>\n` +
+    `Snipe Size: <b>${ethers.formatEther(SNIPE_AMOUNT)} ETH</b>\n` +
+    `Slippage: <b>${SLIPPAGE_PCT}%</b>\n` +
+    `Max Positions: <b>${MAX_POS}</b>\n` +
+    `Gas Multiplier: <b>${globalThis.GAS_MULT || GAS_MULT}x</b>\n` +
+    `Honeypot Scanner: ${HONEYPOT_CHECK ? '✅ ON' : '❌ OFF'}`;
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: isPaused ? '▶️ Resume Bot' : '⏸️ Pause Bot', callback_data: 'toggle_pause' },
+        { text: '🔄 Refresh', callback_data: 'dash_refresh' }
+      ],
+      [
+        { text: '💵 Snipe: +0.0001', callback_data: 'cfg_snipe_up' },
+        { text: '💵 Snipe: -0.0001', callback_data: 'cfg_snipe_down' }
+      ],
+      [
+        { text: '📉 Slippage: +5%', callback_data: 'cfg_slip_up' },
+        { text: '📉 Slippage: -5%', callback_data: 'cfg_slip_down' }
+      ],
+      [
+        { text: '📍 Max Pos: +1', callback_data: 'cfg_pos_up' },
+        { text: '📍 Max Pos: -1', callback_data: 'cfg_pos_down' }
+      ],
+      [
+        { text: '📋 View History', callback_data: 'history' },
+        { text: '🛑 Stop Bot', callback_data: 'stop' }
+      ]
+    ]
+  };
+
+  await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard });
+}
+
+// Edit dashboard inside Telegram (keeps chat clean)
+async function handleDashboardEdit(chatId, messageId) {
+  try {
+    const block = await provider.getBlockNumber().catch(() => '?');
+    const bal = await getBalance();
+    const balEth = parseFloat(ethers.formatEther(bal)).toFixed(4);
+    const stats = db.getWinRateStats();
+    const winRateStr = stats.totalTrades > 0 ? `${stats.winRate.toFixed(1)}%` : 'N/A';
+    
+    const text = `🖥️ <b>Robinhood Bot Dashboard</b>\n` +
+      `--------------------------------\n` +
+      `Status: ${isPaused ? '⏸️ PAUSED' : '▶️ RUNNING'}\n` +
+      `Wallet: <code>${wallet.address}</code>\n` +
+      `Balance: <b>${balEth} ETH</b>\n` +
+      `Current Block: ${block}\n\n` +
+      `📈 <b>Performance (All-Time)</b>\n` +
+      `Realized PnL: <b>${stats.totalRealizedPnl.toFixed(6)} ETH</b>\n` +
+      `Total Trades: ${stats.totalTrades} (${stats.wins} W / ${stats.losses} L)\n` +
+      `Win Rate: ${winRateStr}\n\n` +
+      `⚙️ <b>Active Parameters</b>\n` +
+      `Snipe Size: <b>${ethers.formatEther(SNIPE_AMOUNT)} ETH</b>\n` +
+      `Slippage: <b>${SLIPPAGE_PCT}%</b>\n` +
+      `Max Positions: <b>${MAX_POS}</b>\n` +
+      `Gas Multiplier: <b>${globalThis.GAS_MULT || GAS_MULT}x</b>\n` +
+      `Honeypot Scanner: ${HONEYPOT_CHECK ? '✅ ON' : '❌ OFF'}`;
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: isPaused ? '▶️ Resume Bot' : '⏸️ Pause Bot', callback_data: 'toggle_pause' },
+          { text: '🔄 Refresh', callback_data: 'dash_refresh' }
+        ],
+        [
+          { text: '💵 Snipe: +0.0001', callback_data: 'cfg_snipe_up' },
+          { text: '💵 Snipe: -0.0001', callback_data: 'cfg_snipe_down' }
+        ],
+        [
+          { text: '📉 Slippage: +5%', callback_data: 'cfg_slip_up' },
+          { text: '📉 Slippage: -5%', callback_data: 'cfg_slip_down' }
+        ],
+        [
+          { text: '📍 Max Pos: +1', callback_data: 'cfg_pos_up' },
+          { text: '📍 Max Pos: -1', callback_data: 'cfg_pos_down' }
+        ],
+        [
+          { text: '📋 View History', callback_data: 'history' },
+          { text: '🛑 Stop Bot', callback_data: 'stop' }
+        ]
+      ]
+    };
+
+    await telegramBot.editMessageText(text, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'HTML',
+      reply_markup: keyboard
+    });
+  } catch (e) {
+    logger.debug('Dashboard edit failed: ' + e.message);
+  }
+}
+
+// Scan creator history for rug trends
+async function checkCreatorHistory(tokenAddress) {
+  try {
+    const tokenRes = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${tokenAddress}`);
+    if (!tokenRes.ok) return false;
+    const tokenData = await tokenRes.json();
+    const creator = tokenData.creator_address_hash || tokenData.creatorAddressHash || (tokenData.creator && tokenData.creator.hash);
+    if (!creator || creator === '0x0000000000000000000000000000000000000000') return false;
+
+    logger.info(`[CREATOR SCAN] Token ${tokenAddress} creator: ${creator}`);
+
+    const creatorRes = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${creator}/tokens?type=erc-20`);
+    if (!creatorRes.ok) return false;
+    const creatorData = await creatorRes.json();
+    if (creatorData && creatorData.items && Array.isArray(creatorData.items)) {
+      const pastTokensCount = creatorData.items.length;
+      logger.info(`[CREATOR SCAN] Creator has launched ${pastTokensCount} ERC20 tokens.`);
+      
+      if (pastTokensCount > 5) {
+        logger.warn(`[CREATOR SCAN] Creator ${creator} has high frequency launch history (${pastTokensCount} tokens) - flagged as risky.`);
+        return true;
+      }
+    }
+    return false;
+  } catch (e) {
+    logger.debug(`[CREATOR SCAN] Creator check failed: ${e.message}`);
+    return false;
+  }
+}
+
+// Stuck transaction gas bumper / speed up wrapper
+async function sendTxWithBumping(contractCallFn, label = 'tx') {
+  const feeData = await provider.getFeeData();
+  let basePrio = feeData.maxPriorityFeePerGas || ethers.parseUnits('1', 'gwei');
+  let baseMax = feeData.maxFeePerGas || (basePrio * 2n);
+  
+  let currentPrio = basePrio * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
+  let currentMax = baseMax * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
+
+  logger.info(`[BUMPING TX] Sending first attempt for ${label} (Prio: ${ethers.formatUnits(currentPrio, 'gwei')} gwei, Max: ${ethers.formatUnits(currentMax, 'gwei')} gwei)...`);
+
+  let tx = await contractCallFn(currentMax, currentPrio);
+  const nonce = tx.nonce;
+  
+  return new Promise((resolve, reject) => {
+    let mined = false;
+    
+    const bumpTimeout = setTimeout(async () => {
+      if (mined) return;
+      try {
+        const bumpedPrio = currentPrio * 150n / 100n;
+        const bumpedMax = currentMax * 150n / 100n;
+        
+        logger.warn(`[STUCK TX] ${label} pending for 15s. Bumping gas (Prio: ${ethers.formatUnits(bumpedPrio, 'gwei')} gwei, Max: ${ethers.formatUnits(bumpedMax, 'gwei')} gwei)...`);
+        
+        const speedUpTx = await contractCallFn(bumpedMax, bumpedPrio, nonce);
+        logger.info(`[SPEED UP] Speed up tx sent: ${speedUpTx.hash}`);
+        
+        const receipt = await speedUpTx.wait();
+        mined = true;
+        resolve(receipt);
+      } catch (bumpErr) {
+        logger.error(`[SPEED UP FAILED] Error speeding up transaction: ${bumpErr.message}`);
+        try {
+          const receipt = await tx.wait();
+          mined = true;
+          resolve(receipt);
+        } catch (origErr) {
+          reject(origErr);
+        }
+      }
+    }, 15000);
+
+    tx.wait().then((receipt) => {
+      clearTimeout(bumpTimeout);
+      if (!mined) {
+        mined = true;
+        resolve(receipt);
+      }
+    }).catch((err) => {
+      clearTimeout(bumpTimeout);
+      if (!mined) {
+        reject(err);
+      }
+    });
+  });
 }
 
 const TRADES_HISTORY_FILE = 'trades_history.json';
@@ -2115,6 +2351,7 @@ async function pollNewLaunches() {
         }
         logger.info(`[NEW LAUNCH] curve: ${curveAddr} (token: ${tokenAddr}) on fun.noxa.fi/robinhood`);
         curveToToken.set(curveAddr.toLowerCase(), tokenAddr.toLowerCase());
+        db.logLaunch(curveAddr, tokenAddr, DisplayName = "NEW");
         // Fire-and-forget alerts / menus so one slow TG doesn't block poll loop
         sendAlert(`🚀 New launch: ${curveAddr} on fun.noxa.fi/robinhood`).catch(()=>{});
         sendTg(`🚀 New launch detected: <code>${curveAddr}</code>`).catch(()=>{});
@@ -2201,6 +2438,18 @@ async function main() {
 
   loadPositions();
   await initTelegram();
+
+  // Initialize and start WS Mempool Monitor
+  const wsUrl = config.ws || 'wss://rpc.mainnet.chain.robinhood.com/ws';
+  const mempool = new MempoolMonitor(wsUrl, FACTORY, logger);
+  mempool.onLaunchDetected(async (event) => {
+    logger.info(`[MEMPOOL EVENT] Launch transaction detected in mempool! Hash: ${event.hash}`);
+    sendTg(`⚡ <b>Mempool Launch Detected!</b>\nPending Tx: <code>${event.hash}</code>\nExecuting early checks...`).catch(() => {});
+    await pollNewLaunches().catch(() => {});
+  });
+  mempool.start().catch((err) => {
+    logger.warn('Failed to start mempool WS monitor: ' + err.message);
+  });
 
   // First poll with safety
   try { await withTimeout(pollNewLaunches(), 30000, 'initial poll'); } catch (e) { logger.warn('initial poll issue: ' + e.message); }
