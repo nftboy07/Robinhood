@@ -638,27 +638,32 @@ async function buyToken(curveAddress, amountStr) {
   const buyAmount = ethers.parseEther(amountStr);
   logger.info(`[MANUAL BUY] ${curveAddress} for ${amountStr} ETH`);
 
+  const curve = new ethers.Contract(curveAddress, curveABI, wallet);
   try {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    // Use direct sendTransaction to the curve addr (many bonding curves accept ETH directly for buy)
     const balBefore = await getTokenBalance(curveAddress, wallet.address);
-    const tx = await wallet.sendTransaction({
-      to: curveAddress,
+
+    let minOut = 0n;
+    let gasEst = 300000n;
+    try {
+      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: buyAmount });
+    } catch (e) {
+      // estimate may fail due to sim funds, use fixed
+    }
+
+    const tx = await curve.buy(minOut, wallet.address, {
       value: buyAmount,
-      gasLimit: 300000n,
+      gasLimit: gasEst * 140n / 100n,
       maxFeePerGas: maxFee,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
     const receipt = await tx.wait();
     const txHash = receipt.hash || receipt.transactionHash || 'unknown';
     const txLink = `${EXPLORER}/tx/${txHash}`;
-    logger.info(`[BOUGHT] tx: ${txHash}`);
-    await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
-    await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
 
-    // Add to positions using actual balance diff (robust for curve/token)
+    // Add to positions using actual balance diff
     const balAfter = await getTokenBalance(curveAddress, wallet.address);
     const amount = balAfter > balBefore ? (balAfter - balBefore) : 0n;
     if (amount === 0n) {
@@ -666,11 +671,16 @@ async function buyToken(curveAddress, amountStr) {
       await sendTg(`⚠️ Buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
       return;
     }
+
     let entryPrice = await getCurrentPrice(curveAddress);
     if (entryPrice === 0n && amount > 0n) {
       entryPrice = (buyAmount * (10n ** 18n)) / amount;
     }
     const info = await getTokenInfo(curveAddress);
+
+    logger.info(`[BOUGHT] tx: ${txHash}`);
+    await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
+    await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
 
     // Check if already have position
     const existing = positions.find(p => p.token === curveAddress);
@@ -701,26 +711,31 @@ async function forceBuy(curveAddress, amountStr) {
   const buyAmount = ethers.parseEther(amountStr);
   logger.info(`[FORCE BUY] ${curveAddress} for ${amountStr} ETH (bypassing checks)`);
 
+  const curve = new ethers.Contract(curveAddress, curveABI, wallet);
   try {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
     const balBefore = await getTokenBalance(curveAddress, wallet.address);
-    const tx = await wallet.sendTransaction({
-      to: curveAddress,
+
+    let minOut = 0n;
+    let gasEst = 300000n;
+    try {
+      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: buyAmount });
+    } catch (e) {
+      gasEst = 300000n;
+    }
+
+    const tx = await curve.buy(minOut, wallet.address, {
       value: buyAmount,
-      gasLimit: 300000n,
+      gasLimit: gasEst * 150n / 100n,
       maxFeePerGas: maxFee,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
     const receipt = await tx.wait();
     const txHash = receipt.hash || receipt.transactionHash || 'unknown';
     const txLink = `${EXPLORER}/tx/${txHash}`;
-    logger.info(`[FORCE BOUGHT] tx: ${txHash}`);
-    await sendAlert(`✅ Force Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
-    await sendTg(`✅ Force Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
 
-    // Add to positions using actual balance diff
     const balAfter = await getTokenBalance(curveAddress, wallet.address);
     const amount = balAfter > balBefore ? (balAfter - balBefore) : 0n;
     if (amount === 0n) {
@@ -733,6 +748,10 @@ async function forceBuy(curveAddress, amountStr) {
       entryPrice = (buyAmount * (10n ** 18n)) / amount;
     }
     const info = await getTokenInfo(curveAddress);
+
+    logger.info(`[FORCE BOUGHT] tx: ${txHash}`);
+    await sendAlert(`✅ Force Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
+    await sendTg(`✅ Force Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
 
     const existing = positions.find(p => p.token === curveAddress);
     if (existing) {
@@ -1068,10 +1087,18 @@ async function snipe(curveAddress, symbol) {
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
     const balBefore = await getTokenBalance(curveAddress, wallet.address);
-    const tx = await wallet.sendTransaction({
-      to: curveAddress,
+
+    let minOut = 0n;
+    let gasEst = 300000n;
+    try {
+      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: SNIPE_AMOUNT });
+    } catch (e) {
+      gasEst = 300000n;
+    }
+
+    const tx = await curve.buy(minOut, wallet.address, {
       value: SNIPE_AMOUNT,
-      gasLimit: 300000n,
+      gasLimit: gasEst * 145n / 100n,
       maxFeePerGas: maxFee,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
     });
