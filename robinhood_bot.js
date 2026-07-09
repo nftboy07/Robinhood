@@ -461,8 +461,9 @@ async function getTokenInfo(addr) {
     const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${addr}`);
     if (res.ok) {
       const data = await res.json();
-      if (data.name) name = data.name;
-      if (data.symbol) symbol = data.symbol;
+      const tokenInfo = data.token || data;
+      if (tokenInfo.name) name = tokenInfo.name;
+      if (tokenInfo.symbol) symbol = tokenInfo.symbol;
     }
   } catch (e) {}
   // Then try on-chain ERC20 if better
@@ -549,7 +550,11 @@ async function buyToken(curveAddress, amountStr) {
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const log = receipt.logs.find(l => l.topics[0] === transferTopic);
     const amount = log ? BigInt(log.data) : 0n;
-    const entryPrice = await getCurrentPrice(curveAddress);
+    let entryPrice = await getCurrentPrice(curveAddress);
+    if (entryPrice === 0n && amount > 0n) {
+      // fallback calculate effective entry (ETH per token unit, matching getPrice scale)
+      entryPrice = (buyAmount * (10n ** 18n)) / amount;
+    }
     const info = await getTokenInfo(curveAddress);
 
     // Check if already have position
@@ -605,7 +610,10 @@ async function forceBuy(curveAddress, amountStr) {
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const log = receipt.logs.find(l => l.topics[0] === transferTopic);
     const amount = log ? BigInt(log.data) : 0n;
-    const entryPrice = await getCurrentPrice(curveAddress);
+    let entryPrice = await getCurrentPrice(curveAddress);
+    if (entryPrice === 0n && amount > 0n) {
+      entryPrice = (buyAmount * (10n ** 18n)) / amount;
+    }
     const info = await getTokenInfo(curveAddress);
 
     const existing = positions.find(p => p.token === curveAddress);
@@ -935,12 +943,15 @@ async function snipe(curveAddress, symbol) {
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const log = receipt.logs.find(l => l.topics[0] === transferTopic);
     const amount = log ? BigInt(log.data) : estimated || 0n;
-    const entryPrice = await getCurrentPrice(curveAddress);
+    let entryPrice = await getCurrentPrice(curveAddress);
+    if (entryPrice === 0n && amount > 0n) {
+      entryPrice = (SNIPE_AMOUNT * (10n ** 18n)) / amount;
+    }
     const info = await getTokenInfo(curveAddress);
 
     positions.push({ 
       token: curveAddress, 
-      symbol: `${info.name} (${info.symbol})`, 
+      symbol: symbol || `${info.name} (${info.symbol})`, 
       amount, 
       entryPrice, 
       highestPrice: entryPrice, 
