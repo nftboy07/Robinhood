@@ -257,6 +257,12 @@ async function initTelegram() {
  /clearpos - Clear all positions
  /setsl <pct> - Set SL (runtime)
  /setmoon <pct> - Set moonbag (runtime)
+ /setreentry <dip> <max> - Set re-entry (runtime)
+ /setgas <mult> - Set gas multi (runtime)
+ /setpoll <ms> - Set poll ms (restart for full)
+ /spent - Total est spent ETH
+ /received - Total est tokens
+ /sellmoon - Sell moonbag portions
  /gas /fees - Live gas & costs
  /price <addr> - Price query
  /pnl - PnL
@@ -408,6 +414,57 @@ All real mainnet + links.`;
           STRATEGY.moonbagPct = pct;
           await sendTg(`Moonbag set to ${pct}% (runtime).`);
         }
+      } else if (text.startsWith('/setreentry ')) {
+        const parts = text.split(' ');
+        const dip = parseFloat(parts[1]);
+        const maxr = parseInt(parts[2]);
+        if (dip > 0 && maxr > 0) {
+          STRATEGY.reEntryDipPct = dip;
+          STRATEGY.maxReEntriesPerPosition = maxr;
+          await sendTg(`Re-entry: ${dip}% dip, max ${maxr} (runtime).`);
+        } else {
+          await sendTg('Usage: /setreentry <dip_pct> <max_re>');
+        }
+      } else if (text.startsWith('/setgas ')) {
+        const mult = parseFloat(text.split(' ')[1]);
+        if (mult > 0) {
+          globalThis.GAS_MULT = mult;
+          await sendTg(`Gas multi set to ${mult} (runtime).`);
+        } else {
+          await sendTg('Usage: /setgas <multi>');
+        }
+      } else if (text.startsWith('/setpoll ')) {
+        const ms = parseInt(text.split(' ')[1]);
+        if (ms > 100) {
+          globalThis.POLL_MS = ms;
+          await sendTg(`Poll set to ${ms}ms (restart bot for full effect).`);
+        } else {
+          await sendTg('Usage: /setpoll <ms>');
+        }
+      } else if (text === '/spent') {
+        let total = 0;
+        for (const p of positions) {
+          total += Number(ethers.formatEther(p.entryPrice || 0n));
+        }
+        await telegramBot.sendMessage(msg.chat.id, `Total est spent: ${total.toFixed(6)} ETH across ${positions.length} pos`);
+      } else if (text === '/received') {
+        let total = 0;
+        for (const p of positions) {
+          total += Number(ethers.formatEther(p.amount || 0n));
+        }
+        await telegramBot.sendMessage(msg.chat.id, `Total est received: ${total.toFixed(0)} token units`);
+      } else if (text === '/sellmoon') {
+        await sendTg('Selling moonbag portions...');
+        for (const pos of [...positions]) {
+          const moon = (pos.amount || 0n) * BigInt(Math.floor(STRATEGY.moonbagPct || 25)) / 100n;
+          if (moon > 0n && (pos.amount - (pos.soldAmount || 0n)) > moon) {
+            const temp = {...pos, amount: moon};
+            await sellPosition(temp);
+            pos.soldAmount = (pos.soldAmount || 0n) + moon;
+          }
+        }
+        savePositions();
+        await handlePositions(msg.chat.id);
       } else if (text === '/gas' || text === '/fees') {
         const feeData = await provider.getFeeData();
         const gasPrice = feeData.gasPrice ? ethers.formatUnits(feeData.gasPrice, 'gwei') : 'N/A';
