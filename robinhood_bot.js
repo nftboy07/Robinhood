@@ -995,12 +995,25 @@ async function pollNewLaunches() {
 
     // New launches - force broad scan if factory is placeholder
     const useFactory = FACTORY && !FACTORY.includes('REPLACE') ? FACTORY : undefined;
-    const logs = await withRetry(() => provider.getLogs({
+    let logs = await withRetry(() => provider.getLogs({
       address: useFactory,
       fromBlock: lastPolledBlock + 1,
       toBlock: current,
       topics: [topic]
     }));
+
+    // Fallback: also scan known launch contracts for activity
+    if ((!logs || logs.length === 0) && KNOWN_LAUNCH_CONTRACTS.length > 0) {
+      for (const known of KNOWN_LAUNCH_CONTRACTS) {
+        const extra = await withRetry(() => provider.getLogs({
+          address: known,
+          fromBlock: lastPolledBlock + 1,
+          toBlock: current,
+          topics: [topic]
+        })).catch(() => []);
+        logs = logs.concat(extra);
+      }
+    }
 
     for (const log of logs) {
       if (isPaused) break;
