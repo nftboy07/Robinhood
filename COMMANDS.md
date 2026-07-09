@@ -138,9 +138,10 @@ From the bot chat:
 - `/poll` → forces poll, shows if new launches found
 - `/r` or `/recent` → recent detected tokens + buy buttons
 - `/bal` → balance
-- `/d` or `/diag` or `/info` → **Real diagnostics** (current block, balance, snipe size, factory status, live data)
-- `/buy <amt> <addr>` → manual buy (with honeypot check)
-- `/forcebuy <amt> <addr>` → **force buy** (bypass honeypot and use 0 minOut - for when normal buy reverts)
+- `/d` or `/diag` or `/info` → **Real diagnostics** (current block, balance, snipe size, factory status, live data, RPC)
+- `/config` button → full runtime config + live block/balance
+- `/buy <amt> <addr>` → manual buy (robust, fallback minOut)
+- `/forcebuy <amt> <addr>` → **force buy** (bypass honeypot, 0 minOut - for reverts)
 - `/pause` / `/resume`
 
 **New/Improved output**:

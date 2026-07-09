@@ -343,12 +343,19 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
         await pollNewLaunches();
         await sendMainMenu(chatId);
       } else if (data === 'config') {
-        const cfgText = `⚙️ Current Config:\n` +
-          `Mode: LIVE MAINNET ONLY\n` +
+        const bal = await getBalance();
+        const balEth = ethers.formatEther(bal);
+        const block = await provider.getBlockNumber().catch(() => 'N/A');
+        const cfgText = `⚙️ Current Config (LIVE MAINNET):\n` +
+          `RPC: ${RPC}\n` +
+          `Current Block: ${block}\n` +
           `Snipe: ${ethers.formatEther(SNIPE_AMOUNT)} ETH\n` +
+          `Balance: ${balEth} ETH\n` +
           `SL: ${STOP_LOSS * 100}%\n` +
           `TP: ${TAKE_PROFIT * 100}%\n` +
-          `Factory: ${FACTORY ? 'SET' : 'PLACEHOLDER (broad scan)'}`;
+          `Factory: ${FACTORY && !FACTORY.includes('REPLACE') ? 'SET' : 'PLACEHOLDER (broad scan + known)'}\n` +
+          `Poll: ${POLL_MS}ms | Honeypot: ${HONEYPOT_CHECK}\n` +
+          `Moonbag: ${STRATEGY.moonbagPct || 25}%`;
         await telegramBot.sendMessage(chatId, cfgText);
         await sendMainMenu(chatId);
       } else if (data === 'stop') {
@@ -380,10 +387,10 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
         const addr = data.split('_')[1];
         await sendBuyMenu(addr);
       } else if (data === 'test_buy') {
-        // Test menu for user to see the buy buttons immediately
+        // Test menu for user to see the buy buttons immediately (demo only)
         const testAddr = '0x0000000000000000000000000000000000000000'; // dummy for test
         await sendBuyMenu(testAddr, 'TEST TOKEN');
-        await telegramBot.sendMessage(chatId, 'This is a test menu. Real launches will use actual addresses and names from fun.noxa.fi.');
+        await telegramBot.sendMessage(chatId, '🧪 <b>TEST MENU</b> (demo only on mainnet)\nReal launches use live curve addresses from detection.\nUse /forcebuy or real buttons for actual trades.');
       } else if (data === 'diag') {
         await handleDiag(chatId);
       } else if (data === 'toggle_pause') {
@@ -462,9 +469,11 @@ async function getTokenInfo(addr) {
 }
 
 // Send buy menu for a newly detected token with specific amounts
-async function sendBuyMenu(tokenAddr, fallbackSymbol = "NEW") {
+// tokenAddr = address for buy buttons (curve), nameAddr = optional for ERC20 name lookup
+async function sendBuyMenu(tokenAddr, fallbackSymbol = "NEW", nameAddr = null) {
   if (!telegramBot || !TG_CHAT || !ENABLE_TG) return;
-  const info = await getTokenInfo(tokenAddr);
+  const lookupAddr = nameAddr || tokenAddr;
+  const info = await getTokenInfo(lookupAddr);
   let displayName = `${info.name} (${info.symbol})`;
   if (info.name === "Unknown Token" || info.symbol === "???") {
     displayName = `Unnamed Meme Token`;
@@ -646,18 +655,20 @@ async function handleDiag(chatId) {
     const snipe = ethers.formatEther(SNIPE_AMOUNT);
     const paused = isPaused ? 'PAUSED' : 'RUNNING';
     const factoryStatus = (FACTORY && !FACTORY.includes('REPLACE')) ? 'SET' : 'BROAD SCAN (run discover.js)';
+    const walletLink = `${EXPLORER}/address/${wallet.address}`;
     
-    const text = `🔍 <b>DIAG - Real Output</b>\n` +
-      `Mode: LIVE MAINNET\n` +
+    const text = `🔍 <b>DIAG - Real Mainnet Output</b>\n` +
+      `Mode: LIVE MAINNET ONLY\n` +
       `Status: ${paused}\n` +
-      `Wallet: <code>${wallet.address}</code>\n` +
+      `Wallet: <a href="${walletLink}"><code>${wallet.address}</code></a>\n` +
       `Balance: ${balEth} ETH\n` +
       `Current Block: ${block}\n` +
       `Snipe Amount: ${snipe} ETH\n` +
       `Positions: ${posCount}\n` +
       `Factory: ${factoryStatus}\n` +
-      `Poll Interval: ${POLL_MS}ms\n` +
+      `Poll Interval: ${POLL_MS}ms | Honeypot: ${HONEYPOT_CHECK}\n` +
       `Strategy Moonbag: ${STRATEGY.moonbagPct || 25}%\n` +
+      `RPC: ${RPC}\n` +
       `Time: ${new Date().toISOString()}`;
     
     await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML' });
@@ -1138,7 +1149,7 @@ async function pollNewLaunches() {
         await sendAlert(`🚀 New launch: ${buyAddr} on fun.noxa.fi/robinhood`);
         await sendTg(`🚀 New launch detected: <code>${buyAddr}</code>`);
         // Send buy buttons with real token name, using buyAddr for the buttons
-        await sendBuyMenu(buyAddr);
+        await sendBuyMenu(buyAddr, "NEW", tokenForName);
         // Get info for recent list using token
         const info = await getTokenInfo(tokenForName);
         let display = `${info.name} (${info.symbol})`;
@@ -1153,7 +1164,7 @@ async function pollNewLaunches() {
         setTimeout(() => snipe(buyAddr, info.symbol), 1800);
       } catch {
         const buyAddr = '0x' + log.topics[1].slice(-40);
-        await sendBuyMenu(buyAddr, 'LAUNCH');
+        await sendBuyMenu(buyAddr, 'LAUNCH', buyAddr);
         recentLaunches.unshift({addr: buyAddr, symbol: 'LAUNCH', time: Date.now()});
         if (recentLaunches.length > 5) recentLaunches.pop();
         setTimeout(() => snipe(buyAddr, 'LAUNCH'), 2000);
