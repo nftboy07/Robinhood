@@ -1,0 +1,40 @@
+# VPS SYNC COMMANDS (LIVE MAINNET - dry mode completely removed)
+# Run these AFTER you SSH into the VPS yourself with your PEM key.
+#
+# Example SSH (use your actual PEM path):
+#   ssh -i ~/.ssh/your_robinhood_vps.pem ubuntu@3.69.242.140
+#
+# Once logged in on VPS:
+
+cd ~/robinhood-bot
+
+# Pull the latest (dry removed, live mainnet)
+git pull origin main
+
+# Verify files
+ls -l robinhood_bot.js config.json.example .env* 2>/dev/null || true
+
+# IMPORTANT: Your .env and config.json are preserved (gitignored)
+# - Edit if needed:
+#   nano .env          # confirm PK, TELEGRAM_TOKEN, ADMIN_CHAT_ID
+#   nano config.json   # set REAL factory, weth, router (use discover.js output or devtools)
+#                      # You can safely delete "dryRun" line if still present (code ignores it now)
+
+# Install/update deps if package changed
+npm install --production
+
+# Restart PM2 (name from ecosystem.config.js)
+pm2 restart robinhood-sniper --update-env
+
+# Check logs
+pm2 logs robinhood-sniper --lines 50
+
+# To see status in TG: send /menu or /s to your bot
+
+echo "Bot should now be running LIVE MAINNET with no dry-run code path at all."
+
+# If first time or issues:
+# pm2 start ecosystem.config.js --update-env
+# pm2 save
+
+# Monitor first launches with /poll or wait for auto.
