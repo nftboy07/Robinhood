@@ -184,10 +184,16 @@ async function initTelegram() {
             ],
             [
               { text: '🆕 Recent', callback_data: 'recent' },
-              { text: '🧪 Test Buy', callback_data: 'test_buy' }
+              { text: '🔍 Diag', callback_data: 'diag' }
             ],
             [
-              { text: '🔍 Diag', callback_data: 'diag' }
+              { text: '⛽ Gas', callback_data: 'gas' },
+              { text: '📈 PnL', callback_data: 'pnl' },
+              { text: '🪙 Holdings', callback_data: 'holdings' }
+            ],
+            [
+              { text: '🔄 Refresh', callback_data: 'refresh' },
+              { text: '📊 Stats', callback_data: 'stats' }
             ],
             [
               { text: pauseText, callback_data: 'toggle_pause' },
@@ -243,45 +249,61 @@ async function initTelegram() {
       } else if (text === '/poll') {
         await sendTg('🔄 Forcing poll for new launches...');
         await pollNewLaunches();
-      } else if (text === '/help' || text === '/h' || text === '/commands') {
-        const helpText = `Usable commands:
- /menu or /m - Main menu
- /s or /status - Status
- /p or /positions - Positions (with sell buttons)
- /d or /diag - Real diagnostics
- /sa or /sellall - Sell all
- /sell <n> - Sell full pos n
- /sellp <n> <pct> - Partial sell
- /selladdr <addr> <pct> - Sell by addr
- /setentry <n> <eth> - Manually set entry for pos n
- /snipe <addr> [amt] - Manual snipe
- /check <addr> - Analyze addr (price, bal, buyable)
- /clearpos - Clear all positions
- /setsl <pct> - Set SL (runtime)
- /setmoon <pct> - Set moonbag (runtime)
- /setreentry <dip> <max> - Set re-entry (runtime)
- /setgas <mult> - Set gas multi (runtime)
- /setpoll <ms> - Set poll ms (restart for full)
- /spent - Total est spent ETH
- /received - Total est tokens
- /sellmoon - Sell moonbag portions
- /block - Current block
- /setminout <val> - Set minOut for buys (runtime)
- /lastsells - Recent sells info
- /config - Full config
- /stats - Stats (trades, PnL, block)
- /estimate <addr> [amt] - Simulate buy output
- /gas /fees - Live gas & costs
- /price <addr> - Price query
- /pnl - PnL
- /holdings /tokens - Holdings
- /last - Last launch
- /refresh - Refresh pos data
- /strategy - Strategy
- /poll /recent /bal /buy /forcebuy /setfactory
- /help /h
+      } else if (text === '/help' || text === '/h' || text === '/commands' || text === '/list') {
+        const helpText = `All commands (real mainnet outputs only):
 
-All real mainnet + links.`;
+**Main:**
+/menu /m /start - main menu + keyboard
+/s /status - status (wallet, bal, pos, pnl)
+/p /positions - positions list + sell buttons
+/d /diag /info - full diagnostics (block, bal, config, etc)
+/sa /sellall - sell all positions
+
+**Sell:**
+/sell <n> - sell full position n
+/sellp <n> <pct> - sell % of position n
+/selladdr <addr> <pct> - sell % by address
+/sellmoon - sell moonbag portions
+
+**Buy/Manual:**
+/buy <amt> <addr> - buy (with checks)
+/forcebuy <amt> <addr> - force buy (bypass)
+/snipe <addr> [amt] - manual snipe
+/check <addr> - analyze (price, bal, buyable?)
+/estimate <addr> [amt] - simulate buy output
+
+**Info/Real data:**
+/gas /fees - live gas prices + est costs
+/price <addr> - current price + est tokens
+/pnl /profit - portfolio PnL (real prices)
+/holdings /tokens - wallet token balances (real)
+/spent - total est spent ETH
+/received - total est tokens
+/block - current block
+/last /lastlaunch - last detected launch
+/lastsells - recent sells info
+/stats - trades, pnl, block
+/config - full current config
+
+**Control:**
+/poll - force poll launches
+/r /recent - recent launches + buy buttons
+/bal /balance - wallet balance
+/pause /resume /unpause - pause/resume
+/refresh /fixpos - refresh pos from chain
+/clearpos /resetpos - clear positions
+/setentry <n> <eth> - fix entry price for pos
+/setfactory <addr> - set factory runtime
+/setsl <pct> - set SL (runtime)
+/setmoon <pct> - set moonbag (runtime)
+/setreentry <dip> <max> - set reentry (runtime)
+/setgas <mult> - set gas multi (runtime)
+/setpoll <ms> - set poll interval (restart)
+/setminout <val> - set minOut (runtime)
+/strategy /strat - show auto strategy
+
+Use buttons in /menu or persistent keyboard for fast access.
+All outputs use live mainnet data (no dummy/zero unless real).`;
         await telegramBot.sendMessage(msg.chat.id, helpText);
       } else if (text === '/recent' || text === '/r') {
         // Trigger recent handler
@@ -693,6 +715,96 @@ All real mainnet + links.`;
         isPaused = !isPaused;
         await sendTg(isPaused ? '⏸️ Sniping paused' : '▶️ Sniping resumed');
         await sendMainMenu(chatId);
+      } else if (data === 'gas' || data === 'fees') {
+        const feeData = await provider.getFeeData();
+        const gasPrice = feeData.gasPrice ? ethers.formatUnits(feeData.gasPrice, 'gwei') : 'N/A';
+        const maxFee = feeData.maxFeePerGas ? ethers.formatUnits(feeData.maxFeePerGas, 'gwei') : 'N/A';
+        const prio = feeData.maxPriorityFeePerGas ? ethers.formatUnits(feeData.maxPriorityFeePerGas, 'gwei') : 'N/A';
+        const estBuyGas = 300000;
+        const estSellGas = 550000;
+        const buyCost = feeData.gasPrice ? (Number(ethers.formatUnits(feeData.gasPrice, 'ether')) * estBuyGas * 1.5).toFixed(6) : 'N/A';
+        const sellCost = feeData.gasPrice ? (Number(ethers.formatUnits(feeData.gasPrice, 'ether')) * estSellGas * 1.5).toFixed(6) : 'N/A';
+        await telegramBot.sendMessage(chatId, `⛽ <b>Gas (Mainnet)</b>\nGas Price: ${gasPrice} gwei\nMax Fee: ${maxFee} gwei\nPriority: ${prio} gwei\nEst Buy (0.0001): ~${buyCost} ETH\nEst Sell: ~${sellCost} ETH\nBlock: ${await provider.getBlockNumber().catch(()=>'?')}`);
+        await sendMainMenu(chatId);
+      } else if (data === 'pnl' || data === 'profit') {
+        let totalUnreal = 0;
+        let totalSpent = 0;
+        let hasIncomplete = false;
+        for (const p of positions) {
+          const spent = Number(ethers.formatEther(p.entryPrice || 0n));
+          if (spent === 0) hasIncomplete = true;
+          totalSpent += spent;
+          const currP = await getCurrentPrice(p.token);
+          const pnlPct = (p.entryPrice > 0n && currP > 0n) ? ((Number(currP) - Number(p.entryPrice)) / Number(p.entryPrice)) * 100 : 0;
+          const unreal = Number(ethers.formatEther(p.amount || 0n)) * (pnlPct / 100);
+          totalUnreal += unreal;
+        }
+        const bal = await getBalance();
+        let note = hasIncomplete ? '\n(Note: some positions have incomplete entry tracking - PnL approximate)' : '';
+        await telegramBot.sendMessage(chatId, `📊 <b>PnL (Mainnet)</b>\nPositions: ${positions.length}\nUnrealized PnL: ~${totalUnreal.toFixed(6)} ETH\nEst Total Spent: ~${totalSpent.toFixed(4)} ETH\nCurrent Bal: ${ethers.formatEther(bal)} ETH\n(Realized tracked in dailyStats)${note}`);
+        await sendMainMenu(chatId);
+      } else if (data === 'holdings' || data === 'tokens') {
+        let out = '🪙 <b>Holdings (Mainnet)</b>\n';
+        const addrs = [...new Set(positions.map(p => p.token).concat(recentLaunches.map(l => l.addr)))];
+        for (const a of addrs.slice(0,8)) {
+          try {
+            const erc = new ethers.Contract(a, ["function balanceOf(address) view returns (uint256)","function symbol() view returns (string)"], provider);
+            const b = await erc.balanceOf(wallet.address);
+            let sym = '???';
+            try { sym = await erc.symbol(); } catch { 
+              const info = await getTokenInfo(a); sym = info.symbol || '???'; 
+            }
+            out += `${sym}: ${ethers.formatEther(b)} @ <code>${a}</code>\n`;
+          } catch (e) { out += `Addr ${a}: query failed\n`; }
+        }
+        out += `Native: ${ethers.formatEther(await getBalance())} ETH\n<a href="${EXPLORER}/address/${wallet.address}">Wallet</a>`;
+        await telegramBot.sendMessage(chatId, out);
+        await sendMainMenu(chatId);
+      } else if (data === 'refresh' || data === 'fixpos') {
+        await sendTg('Refreshing positions from on-chain...');
+        for (const p of positions) {
+          if (p.amount === 0n || p.entryPrice === 0n) {
+            const bal = await getTokenBalance(p.token, wallet.address);
+            if (bal > 0n) {
+              p.amount = bal;
+              if (p.entryPrice === 0n) {
+                p.entryPrice = 0n;
+              }
+            }
+          }
+          const info = await getTokenInfo(p.token);
+          if (info.name && !info.name.includes('Unknown')) {
+            p.symbol = `${info.name} (${info.symbol})`;
+          }
+        }
+        savePositions();
+        await handlePositions(chatId);
+        await sendMainMenu(chatId);
+      } else if (data === 'stats') {
+        const statsText = `📈 Stats (Mainnet):\n` +
+          `Daily trades: ${dailyStats.trades}\n` +
+          `Realized PnL: ${dailyStats.realizedPnl.toFixed(6)} ETH\n` +
+          `Positions: ${positions.length}\n` +
+          `Last block: ${await provider.getBlockNumber().catch(()=> '?')}\n` +
+          `Uptime: running`;
+        await telegramBot.sendMessage(chatId, statsText);
+        await sendMainMenu(chatId);
+      } else if (data === 'config') {
+        const bal = await getBalance();
+        const balEth = ethers.formatEther(bal);
+        const block = await provider.getBlockNumber().catch(() => 'N/A');
+        const cfgText = `⚙️ Current Config (LIVE MAINNET):\n` +
+          `RPC: ${RPC}\n` +
+          `Current Block: ${block}\n` +
+          `Snipe: ${ethers.formatEther(SNIPE_AMOUNT)} ETH\n` +
+          `Balance: ${balEth} ETH\n` +
+          `SL: ${STOP_LOSS * 100}%\n` +
+          `TP: ${TAKE_PROFIT * 100}%\n` +
+          `Factory: ${FACTORY && !FACTORY.includes('REPLACE') ? 'SET' : 'PLACEHOLDER (broad scan + known)'}\n` +
+          `Poll: ${POLL_MS}ms | Honeypot: ${HONEYPOT_CHECK}\n` +
+          `Moonbag: ${STRATEGY.moonbagPct || 25}%`;
+        await telegramBot.sendMessage(chatId, cfgText);
+        await sendMainMenu(chatId);
       }
     });
 
@@ -974,7 +1086,12 @@ async function handlePositions(chatId) {
       } catch {}
     }
     const balStr = ethers.formatEther(liveBal);
-    text += `${i+1}. ${p.symbol} (${p.token})\n   Entry: ${entryStr} | Sold: ${sold} | Bal: ${balStr} | Re-entries: ${p.reEntries || 0}\n`;
+    const info = await getTokenInfo(p.token);
+    let sym = `${info.name} (${info.symbol})`;
+    if (info.name === "Unknown Token" || info.symbol === "???") {
+      sym = `Token (${p.token.slice(0,6)}...${p.token.slice(-4)})`;
+    }
+    text += `${i+1}. ${sym} (${p.token})\n   Entry: ${entryStr} | Sold: ${sold} | Bal: ${balStr} | Re-entries: ${p.reEntries || 0}\n`;
   }
   const keyboard = {
     inline_keyboard: positions.map((p, i) => [
