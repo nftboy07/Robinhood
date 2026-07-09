@@ -340,6 +340,7 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
     logger.info('Telegram alerts + BUTTONS ENABLED (fun.noxa.fi mode)');
     await sendTg('🚀 Robinhood Sniper started - focused on fun.noxa.fi/robinhood');
     await sendMainMenu(TG_CHAT, 'Menu ready. Use buttons below:');
+    await sendAlert('🚀 Robinhood Sniper started (live on fun.noxa.fi/robinhood)');
   } catch (e) {
     logger.warn('Telegram init failed:', e.message);
   }
@@ -457,6 +458,7 @@ async function buyToken(curveAddress, amountStr) {
     });
     const receipt = await tx.wait();
     logger.info(`[BOUGHT] tx: ${receipt.transactionHash}`);
+    await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${receipt.transactionHash}`);
     await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${receipt.transactionHash}</code>`);
 
     // Add to positions (simplified)
@@ -964,6 +966,7 @@ async function pollNewLaunches() {
       try {
         const token = '0x' + log.topics[1].slice(-40);
         logger.info(`[NEW LAUNCH] ${token} on fun.noxa.fi/robinhood`);
+        await sendAlert(`🚀 New launch: ${token} on fun.noxa.fi/robinhood`);
         await sendTg(`🚀 New launch detected: <code>${token}</code>`);
         // Send buy buttons with real token name
         await sendBuyMenu(token);
