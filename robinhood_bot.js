@@ -850,13 +850,21 @@ async function handlePositions(chatId) {
     return;
   }
   let text = '📍 <b>Open Positions</b>\n';
-  positions.forEach((p, i) => {
+  for (let i = 0; i < positions.length; i++) {
+    const p = positions[i];
     const entry = ethers.formatEther(p.entryPrice);
     const sold = p.soldAmount ? ethers.formatEther(p.soldAmount) : '0';
     let entryStr = entry;
     if (p.entryPrice === 0n) entryStr = "0 (tracking incomplete - check tx for actual spent)";
-    text += `${i+1}. ${p.symbol} (${p.token})\n   Entry: ${entryStr} | Sold: ${sold} | Re-entries: ${p.reEntries || 0}\n`;
-  });
+    let liveBal = p.amount;
+    if (p.amount === 0n) {
+      try {
+        liveBal = await getTokenBalance(p.token, wallet.address);
+      } catch {}
+    }
+    const balStr = ethers.formatEther(liveBal);
+    text += `${i+1}. ${p.symbol} (${p.token})\n   Entry: ${entryStr} | Sold: ${sold} | Bal: ${balStr} | Re-entries: ${p.reEntries || 0}\n`;
+  }
   const keyboard = {
     inline_keyboard: positions.map((p, i) => [
       { text: `💸 Sell #${i+1} ${p.symbol.slice(0,10)}`, callback_data: `sell_${i}` }

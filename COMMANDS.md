@@ -188,6 +188,15 @@ p.getCode("0xREPLACE_FACTORY").then(code => {
 
 Updates for current session. For permanent edit `config.json` on VPS + restart.
 
+## 10. Additional TG Commands (real mainnet outputs)
+- `/setentry <n> <eth>` — Manually fix entry for position n (e.g. from actual spent ETH).
+- `/snipe <addr> [amt]` — Manual snipe on specific address.
+- `/check <addr>` — Analyze: name, current price, your balance, if buyable.
+- `/clearpos` or `/resetpos` — Clear tracked positions.
+- `/setsl <pct>` — Set stop loss % (runtime).
+- `/setmoon <pct>` — Set moonbag % (runtime).
+- `/strategy` or `/strat` — Show current auto selling strategy.
+
 ## 8. TG Diag + VPS Real Diag (tests + live chain data)
 
 ```bash
