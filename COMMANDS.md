@@ -181,17 +181,25 @@ p.getCode("0xREPLACE_FACTORY").then(code => {
 
 ---
 
-## 8. TG Diag (tests real Telegram connection)
+## 8. TG Diag + VPS Real Diag (tests + live chain data)
 
 ```bash
 cd ~/robinhood-bot
 node tg_diag.js
 ```
 
+```bash
+# New: real output without starting the full bot (current block, balance, config)
+node vps_diag.js
+```
+
 **Expected real output**:
 - Bot username + ID
-- Webhook info (should be empty)
-- Confirmation that test message was sent to your chat
+- Webhook info
+- Current live block number
+- Wallet balance
+- Config status (factory set?)
+- Positions count from file
 
 ---
 
