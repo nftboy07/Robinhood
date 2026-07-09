@@ -175,6 +175,9 @@ async function initTelegram() {
               { text: '📋 Recent Launches', callback_data: 'recent' }
             ],
             [
+              { text: '🧪 Test Buy Menu', callback_data: 'test_buy' }
+            ],
+            [
               { text: '🔁 Refresh Menu', callback_data: 'menu' }
             ]
           ]
@@ -274,6 +277,11 @@ async function initTelegram() {
       } else if (data.startsWith('showbuy_')) {
         const addr = data.split('_')[1];
         await sendBuyMenu(addr);
+      } else if (data === 'test_buy') {
+        // Test menu for user to see the buy buttons immediately
+        const testAddr = '0x0000000000000000000000000000000000000000'; // dummy for test
+        await sendBuyMenu(testAddr, 'TEST TOKEN');
+        await telegramBot.sendMessage(chatId, 'This is a test menu. Real launches will use actual addresses and names from fun.noxa.fi.');
       }
     });
 
