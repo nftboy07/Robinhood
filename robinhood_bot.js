@@ -243,15 +243,18 @@ async function initTelegram() {
         const helpText = `Usable commands:
  /menu or /m - Main menu
  /s or /status - Status
- /p or /positions - Positions
+ /p or /positions - Positions (with sell buttons)
  /d or /diag - Real diagnostics (block, bal, config)
- /sa or /sellall - Sell all
+ /sa or /sellall - Sell all positions
+ /sell <n> - Sell full position n (from /p)
+ /sellp <n> <pct> - Sell pct% of position n
+ /selladdr <addr> <pct> - Sell pct% of token at addr
  /poll - Force poll
  /recent or /r - Recent launches
  /bal - Balance
  /buy <amt> <addr> - Manual buy (with checks)
- /forcebuy <amt> <addr> - Force buy (bypass honeypot, 0 minOut)
- /setfactory 0x... - Set factory at runtime (edit config.json for persist + restart)
+ /forcebuy <amt> <addr> - Force buy (bypass, for reverts)
+ /setfactory 0x... - Set factory at runtime
  /help or /h - This help
 
 Use buttons for fast actions. New launches auto-post buy buttons.`;
@@ -303,6 +306,27 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
         } else {
           await telegramBot.sendMessage(msg.chat.id, 'Usage: /setfactory 0x... (42 char address)');
         }
+      } else if (text.startsWith('/sell ')) {
+        const idx = parseInt(text.split(' ')[1]) - 1;
+        if (positions[idx]) {
+          await sellPosition(positions[idx]);
+        } else {
+          await sendTg('Invalid position index. Use /p to list.');
+        }
+      } else if (text.startsWith('/sellp ')) {
+        const parts = text.split(' ');
+        const idx = parseInt(parts[1]) - 1;
+        const pct = parseFloat(parts[2]) || 100;
+        if (positions[idx]) {
+          await sellPercent(positions[idx], pct);
+        } else {
+          await sendTg('Invalid position index.');
+        }
+      } else if (text.startsWith('/selladdr ')) {
+        const parts = text.split(' ');
+        const addr = parts[1];
+        const pct = parseFloat(parts[2]) || 100;
+        await sellByAddr(addr, pct);
       } else if (text === '/bal' || text === '/balance') {
         const bal = await getBalance();
         await telegramBot.sendMessage(msg.chat.id, `Balance: ${ethers.formatEther(bal)} ETH`);
@@ -660,7 +684,7 @@ async function handlePositions(chatId) {
   positions.forEach((p, i) => {
     const entry = ethers.formatEther(p.entryPrice);
     const sold = p.soldAmount ? ethers.formatEther(p.soldAmount) : '0';
-    text += `${i+1}. ${p.symbol}\n   Entry: ${entry} | Sold: ${sold} | Re-entries: ${p.reEntries || 0}\n`;
+    text += `${i+1}. ${p.symbol} (${p.token})\n   Entry: ${entry} | Sold: ${sold} | Re-entries: ${p.reEntries || 0}\n`;
   });
   const keyboard = {
     inline_keyboard: positions.map((p, i) => [
@@ -1010,6 +1034,49 @@ async function sellPosition(pos) {
     savePositions();
   } catch (e) {
     logger.error(`Sell error: ${e.message}`);
+  }
+}
+
+async function sellPercent(pos, pct) {
+  let remaining = pos.amount - (pos.soldAmount || 0n);
+  if (remaining <= 0n) {
+    await sendTg('No remaining to sell.');
+    return;
+  }
+  let sellAmt = remaining * BigInt(Math.floor(pct)) / 100n;
+  if (sellAmt > 0n) {
+    const temp = { ...pos, amount: sellAmt };
+    await sellPosition(temp);
+    pos.soldAmount = (pos.soldAmount || 0n) + sellAmt;
+    savePositions();
+  }
+}
+
+async function sellByAddr(addr, pct = 100) {
+  let pos = positions.find(p => p.token.toLowerCase() === addr.toLowerCase());
+  if (!pos) {
+    pos = { token: addr, amount: 0n, soldAmount: 0n, symbol: 'Unknown', isMigrated: false };
+  }
+  let remaining = pos.amount - (pos.soldAmount || 0n);
+  if (remaining === 0n) {
+    // try actual token balance
+    try {
+      const erc20 = new ethers.Contract(addr, ["function balanceOf(address) view returns (uint256)"], provider);
+      remaining = await erc20.balanceOf(wallet.address);
+    } catch (e) {
+      logger.warn('Could not get balance for ' + addr);
+    }
+  }
+  if (remaining <= 0n) {
+    await sendTg('No balance found to sell for ' + addr);
+    return;
+  }
+  let sellAmt = remaining * BigInt(Math.floor(pct)) / 100n;
+  const temp = { ...pos, amount: sellAmt };
+  await sellPosition(temp);
+  if (pos.soldAmount !== undefined) {
+    pos.soldAmount = (pos.soldAmount || 0n) + sellAmt;
+    savePositions();
   }
 }
 

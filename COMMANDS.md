@@ -183,6 +183,11 @@ p.getCode("0xREPLACE_FACTORY").then(code => {
 
 ---
 
+## 9. Set Factory via TG (runtime)
+`/setfactory 0xYourRealFactoryAddress`
+
+Updates for current session. For permanent edit `config.json` on VPS + restart.
+
 ## 8. TG Diag + VPS Real Diag (tests + live chain data)
 
 ```bash
