@@ -1048,30 +1048,35 @@ async function pollNewLaunches() {
     for (const log of logs) {
       if (isPaused) break;
       try {
-        const token = '0x' + log.topics[1].slice(-40);
-        logger.info(`[NEW LAUNCH] ${token} on fun.noxa.fi/robinhood`);
-        await sendAlert(`🚀 New launch: ${token} on fun.noxa.fi/robinhood`);
-        await sendTg(`🚀 New launch detected: <code>${token}</code>`);
-        // Send buy buttons with real token name
-        await sendBuyMenu(token);
-        // Get info for recent list
-        const info = await getTokenInfo(token);
+        // Use topics[1] as token, topics[2] as curve if present (common in launch events)
+        let buyAddr = '0x' + log.topics[1].slice(-40);
+        if (log.topics.length > 2 && log.topics[2] && log.topics[2] !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
+          buyAddr = '0x' + log.topics[2].slice(-40);
+        }
+        const tokenForName = '0x' + log.topics[1].slice(-40); // for name lookup, use token
+        logger.info(`[NEW LAUNCH] curve/buy: ${buyAddr} (token: ${tokenForName}) on fun.noxa.fi/robinhood`);
+        await sendAlert(`🚀 New launch: ${buyAddr} on fun.noxa.fi/robinhood`);
+        await sendTg(`🚀 New launch detected: <code>${buyAddr}</code>`);
+        // Send buy buttons with real token name, using buyAddr for the buttons
+        await sendBuyMenu(buyAddr);
+        // Get info for recent list using token
+        const info = await getTokenInfo(tokenForName);
         let display = `${info.name} (${info.symbol})`;
         if (info.name === "Unknown Token") {
-          const short = token.slice(0,6) + "..." + token.slice(-4);
+          const short = tokenForName.slice(0,6) + "..." + tokenForName.slice(-4);
           display = `Unnamed (${short})`;
         }
-        // Track for recent
-        recentLaunches.unshift({addr: token, symbol: display, time: Date.now()});
+        // Track for recent (use buyAddr for actual buy)
+        recentLaunches.unshift({addr: buyAddr, symbol: display, time: Date.now()});
         if (recentLaunches.length > 5) recentLaunches.pop();
-        // Keep small auto snipe if desired
-        setTimeout(() => snipe(token, info.symbol), 1800);
+        // Keep small auto snipe if desired - use buyAddr
+        setTimeout(() => snipe(buyAddr, info.symbol), 1800);
       } catch {
-        const token = '0x' + log.topics[1].slice(-40);
-        await sendBuyMenu(token, 'LAUNCH');
-        recentLaunches.unshift({addr: token, symbol: 'LAUNCH', time: Date.now()});
+        const buyAddr = '0x' + log.topics[1].slice(-40);
+        await sendBuyMenu(buyAddr, 'LAUNCH');
+        recentLaunches.unshift({addr: buyAddr, symbol: 'LAUNCH', time: Date.now()});
         if (recentLaunches.length > 5) recentLaunches.pop();
-        setTimeout(() => snipe(token, 'LAUNCH'), 2000);
+        setTimeout(() => snipe(buyAddr, 'LAUNCH'), 2000);
       }
     }
 
