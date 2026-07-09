@@ -37,6 +37,10 @@ async function findRecentLaunches() {
   const fromBlock = Math.max(0, current - LOOKBACK);
   console.log(`Scanning last ${LOOKBACK} blocks (${fromBlock} → ${current})\n`);
 
+  // Extra real output
+  console.log('Provider RPC:', process.env.RPC || 'https://rpc.mainnet.chain.robinhood.com (default)');
+  console.log('Tip: Be actively watching https://fun.noxa.fi/robinhood in browser while this runs for best results.\n');
+
   // Common events
   const topics = {
     Transfer: ethers.id('Transfer(address,address,uint256)'),

@@ -1054,18 +1054,29 @@ async function pollNewLaunches() {
 // ====================== MAIN ======================
 async function main() {
   console.log('=== ROBINHOOD CHAIN SNIPER - fun.noxa.fi/robinhood (LIVE MAINNET) ===');
-  logger.info(`Wallet: ${wallet.address}`);
   logger.info(`Mode: LIVE MAINNET ONLY (experienced user)`);
   logger.info(`Snipe size: ${ethers.formatEther(SNIPE_AMOUNT)} ETH (from config or default)`);
   logger.info(`Wallet: ${wallet.address}`);
   logger.info(`Focus: fun.noxa.fi/robinhood bonding curves`);
 
+  // Real output diagnostics
+  try {
+    const net = await provider.getNetwork();
+    const block = await provider.getBlockNumber();
+    logger.info(`Chain ID: ${net.chainId} | Current block: ${block}`);
+    logger.info(`RPC: ${RPC}`);
+  } catch (e) {
+    logger.warn('RPC check issue: ' + e.message);
+  }
+
+  if (!FACTORY || FACTORY.includes('REPLACE')) {
+    logger.warn('No factory set in config. Using broad scan + KNOWN list. Run "node discover.js" WHILE watching a launch on fun.noxa.fi/robinhood for real addresses.');
+  } else {
+    logger.info(`Factory: ${FACTORY}`);
+  }
+
   loadPositions();
   await initTelegram();
-
-  if (!FACTORY) {
-    logger.warn('No factory set in config. Using broad scan. Run "node discover.js" while launches happen.');
-  }
 
   await pollNewLaunches();
 

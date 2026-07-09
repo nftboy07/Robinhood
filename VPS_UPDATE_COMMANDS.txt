@@ -1,4 +1,7 @@
 # VPS SYNC COMMANDS (LIVE MAINNET - dry mode completely removed)
+#
+# For MANY MORE commands that produce REAL OUTPUT (discovery, logs, chain data, TG tests):
+#   See COMMANDS.md in the repo (highly recommended)
 # Run these AFTER you SSH into the VPS yourself with your PEM key.
 #
 # Example SSH (use your actual PEM path):

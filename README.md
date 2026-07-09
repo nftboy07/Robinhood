@@ -322,7 +322,11 @@ After any code change (including this dry-run removal):
 
 Your `.env` and `config.json` stay untouched (they are gitignored). Only edit them with `nano` if you need to change PK/TG or factory addresses.
 
-See `VPS_UPDATE_COMMANDS.txt` in the repo for the full ready-to-paste block.
+See:
+- `VPS_UPDATE_COMMANDS.txt`
+- `COMMANDS.md` (big list of commands that produce **real output** — blocks, txs, discovery, logs, TG responses)
+
+Both in the repo root.
 
 ## GitHub / References (adapt from prompt)
 
