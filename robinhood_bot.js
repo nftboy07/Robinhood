@@ -249,7 +249,8 @@ async function initTelegram() {
  /poll - Force poll
  /recent or /r - Recent launches
  /bal - Balance
- /buy <amt> <addr> - Manual buy
+ /buy <amt> <addr> - Manual buy (with checks)
+ /forcebuy <amt> <addr> - Force buy (bypass honeypot, 0 minOut)
  /help or /h - This help
 
 Use buttons for fast actions. New launches auto-post buy buttons.`;
@@ -279,6 +280,16 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
           await buyToken(addr, amt);
         } else {
           await telegramBot.sendMessage(msg.chat.id, 'Usage: /buy <amount> <address>');
+        }
+      } else if (text.startsWith('/forcebuy ')) {
+        // Force buy bypassing honeypot and using 0 minOut: /forcebuy 0.005 0xaddr
+        const parts = text.split(' ');
+        if (parts.length >= 3) {
+          const amt = parts[1];
+          const addr = parts[2];
+          await forceBuy(addr, amt);
+        } else {
+          await telegramBot.sendMessage(msg.chat.id, 'Usage: /forcebuy <amount> <address>');
         }
       } else if (text === '/bal' || text === '/balance') {
         const bal = await getBalance();
@@ -486,11 +497,19 @@ async function buyToken(curveAddress, amountStr) {
 
   const curve = new ethers.Contract(curveAddress, curveABI, wallet);
   try {
-    const gasEst = await curve.buy.estimateGas(0n, wallet.address, { value: buyAmount });
+    let minOut = 0n;
+    let gasEst;
+    try {
+      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: buyAmount });
+    } catch (e) {
+      // fallback
+      minOut = 0n;
+      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: buyAmount });
+    }
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    const tx = await curve.buy(1n, wallet.address, {
+    const tx = await curve.buy(minOut, wallet.address, {
       value: buyAmount,
       gasLimit: gasEst * 140n / 100n,
       maxFeePerGas: maxFee,
@@ -531,6 +550,60 @@ async function buyToken(curveAddress, amountStr) {
   } catch (e) {
     logger.error(`[BUY FAIL]: ${e.message}`);
     await sendTg(`❌ Buy failed: ${e.message.slice(0,100)}`);
+  }
+}
+
+async function forceBuy(curveAddress, amountStr) {
+  const buyAmount = ethers.parseEther(amountStr);
+  logger.info(`[FORCE BUY] ${curveAddress} for ${amountStr} ETH (bypassing checks)`);
+
+  const curve = new ethers.Contract(curveAddress, curveABI, wallet);
+  try {
+    const minOut = 0n;
+    const gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: buyAmount }).catch(() => 300000n);
+    const feeData = await provider.getFeeData();
+    const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
+
+    const tx = await curve.buy(minOut, wallet.address, {
+      value: buyAmount,
+      gasLimit: gasEst * 150n / 100n,
+      maxFeePerGas: maxFee,
+      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
+    });
+    const receipt = await tx.wait();
+    const txLink = `${EXPLORER}/tx/${receipt.transactionHash}`;
+    logger.info(`[FORCE BOUGHT] tx: ${receipt.transactionHash}`);
+    await sendAlert(`✅ Force Bought ${amountStr} ETH on ${curveAddress}\nTx: ${receipt.transactionHash}\n${txLink}`);
+    await sendTg(`✅ Force Bought ${amountStr} ETH worth\nTx: <code>${receipt.transactionHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
+
+    // Add to positions
+    const transferTopic = ethers.id('Transfer(address,address,uint256)');
+    const log = receipt.logs.find(l => l.topics[0] === transferTopic);
+    const amount = log ? BigInt(log.data) : 0n;
+    const entryPrice = await getCurrentPrice(curveAddress);
+    const info = await getTokenInfo(curveAddress);
+
+    const existing = positions.find(p => p.token === curveAddress);
+    if (existing) {
+      existing.amount += amount;
+    } else {
+      positions.push({
+        token: curveAddress,
+        symbol: `${info.name} (${info.symbol})`,
+        amount,
+        entryPrice,
+        highestPrice: entryPrice,
+        isMigrated: false,
+        entryBlock: receipt.blockNumber,
+        soldAmount: 0n,
+        reEntries: 0,
+        tpReached: []
+      });
+    }
+    savePositions();
+  } catch (e) {
+    logger.error(`[FORCE BUY FAIL]: ${e.message}`);
+    await sendTg(`❌ Force buy failed: ${e.message.slice(0,100)}`);
   }
 }
 
@@ -797,11 +870,18 @@ async function snipe(curveAddress, symbol) {
       return;
     }
 
-    const gasEst = await curve.buy.estimateGas(0n, wallet.address, { value: SNIPE_AMOUNT });
+    let minOut = 0n;
+    let gasEst;
+    try {
+      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: SNIPE_AMOUNT });
+    } catch (e) {
+      minOut = 0n;
+      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: SNIPE_AMOUNT });
+    }
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    const tx = await curve.buy(1n, wallet.address, {
+    const tx = await curve.buy(minOut, wallet.address, {
       value: SNIPE_AMOUNT,
       gasLimit: gasEst * 145n / 100n,
       maxFeePerGas: maxFee,

@@ -139,7 +139,8 @@ From the bot chat:
 - `/r` or `/recent` → recent detected tokens + buy buttons
 - `/bal` → balance
 - `/d` or `/diag` or `/info` → **Real diagnostics** (current block, balance, snipe size, factory status, live data)
-- `/buy 0.0001 0xTHE_TOKEN_ADDRESS` → manual buy (use real address from discovery)
+- `/buy <amt> <addr>` → manual buy (with honeypot check)
+- `/forcebuy <amt> <addr>` → **force buy** (bypass honeypot and use 0 minOut - for when normal buy reverts)
 - `/pause` / `/resume`
 
 **New/Improved output**:
