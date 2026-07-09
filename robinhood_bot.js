@@ -65,6 +65,12 @@ if (!PRIVATE_KEY || PRIVATE_KEY.includes('YOUR')) {
 const FACTORY = config.factory || '';
 const WETH = config.weth || '';
 const ROUTER = config.router || '';
+
+// Known launch related contracts for better detection (update as discovered)
+const KNOWN_LAUNCH_CONTRACTS = [
+  '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f', // pair factory candidate
+  '0xCaf681a66D020601342297493863E78C959E5cb2'  // high activity
+];
 const STOP_LOSS = config.stopLossPct ?? 0.15;
 const TAKE_PROFIT = config.takeProfitPct ?? 0.60;
 const TRAILING = config.trailingStopPct ?? 0.08;
@@ -138,6 +144,9 @@ let dailyStats = {
   lastTradeHour: 0
 };
 
+// Sniping pause state (for safety)
+let isPaused = false;
+
 // Telegram command queue
 let pendingCommands = [];
 
@@ -162,6 +171,7 @@ async function initTelegram() {
 
     // Helper to send main menu with buttons - fast and usable
     const sendMainMenu = async (chatId, text = '🤖 <b>Robinhood Sniper</b> - fast menu') => {
+      const pauseText = isPaused ? '▶️ Resume' : '⏸️ Pause';
       const opts = {
         reply_markup: {
           inline_keyboard: [
@@ -178,7 +188,10 @@ async function initTelegram() {
               { text: '🧪 Test Buy', callback_data: 'test_buy' }
             ],
             [
-              { text: '⚙️ Config', callback_data: 'config' },
+              { text: pauseText, callback_data: 'toggle_pause' },
+              { text: '⚙️ Config', callback_data: 'config' }
+            ],
+            [
               { text: '🛑 Stop', callback_data: 'stop' }
             ]
           ]
@@ -264,6 +277,12 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
       } else if (text === '/bal' || text === '/balance') {
         const bal = await getBalance();
         await telegramBot.sendMessage(msg.chat.id, `Balance: ${ethers.formatEther(bal)} ETH`);
+      } else if (text === '/pause') {
+        isPaused = true;
+        await sendTg('⏸️ Sniping paused');
+      } else if (text === '/resume' || text === '/unpause') {
+        isPaused = false;
+        await sendTg('▶️ Sniping resumed');
       }
     });
 
@@ -346,6 +365,10 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
         const testAddr = '0x0000000000000000000000000000000000000000'; // dummy for test
         await sendBuyMenu(testAddr, 'TEST TOKEN');
         await telegramBot.sendMessage(chatId, 'This is a test menu. Real launches will use actual addresses and names from fun.noxa.fi.');
+      } else if (data === 'toggle_pause') {
+        isPaused = !isPaused;
+        await sendTg(isPaused ? '⏸️ Sniping paused' : '▶️ Sniping resumed');
+        await sendMainMenu(chatId);
       }
     });
 
@@ -691,6 +714,10 @@ async function sellOnDex(tokenAddress, tokenAmount) {
 
 // ====================== SNIPE (focus fun.noxa.fi) ======================
 async function snipe(curveAddress, symbol) {
+  if (isPaused) {
+    logger.info(`[PAUSED] Skipping snipe for ${symbol}`);
+    return;
+  }
   if (positions.length >= MAX_POS) return;
   if (!checkRiskLimits()) return;
 
@@ -966,15 +993,17 @@ async function pollNewLaunches() {
     const topic = config.eventTopic || ethers.id('TokenCreated(address,address,string,string,uint256)');
     const curveCompleteTopic = ethers.id('CurveCompleted(address,uint256,uint256)');
 
-    // New launches
+    // New launches - force broad scan if factory is placeholder
+    const useFactory = FACTORY && !FACTORY.includes('REPLACE') ? FACTORY : undefined;
     const logs = await withRetry(() => provider.getLogs({
-      address: FACTORY || undefined,
+      address: useFactory,
       fromBlock: lastPolledBlock + 1,
       toBlock: current,
       topics: [topic]
     }));
 
     for (const log of logs) {
+      if (isPaused) break;
       try {
         const token = '0x' + log.topics[1].slice(-40);
         logger.info(`[NEW LAUNCH] ${token} on fun.noxa.fi/robinhood`);
