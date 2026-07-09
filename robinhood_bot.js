@@ -210,6 +210,7 @@ async function initTelegram() {
             ['/gas', '/pnl', '/holdings'],
             ['/check', '/snipe', '/refresh'],
             ['/spent', '/config', '/stats'],
+            ['/block', '/estimate', '/lastsells'],
             ['/menu']
           ],
           resize_keyboard: true,
@@ -264,6 +265,9 @@ async function initTelegram() {
  /spent - Total est spent ETH
  /received - Total est tokens
  /sellmoon - Sell moonbag portions
+ /block - Current block
+ /setminout <val> - Set minOut for buys (runtime)
+ /lastsells - Recent sells info
  /config - Full config
  /stats - Stats (trades, PnL, block)
  /estimate <addr> [amt] - Simulate buy output
@@ -469,6 +473,20 @@ All real mainnet + links.`;
         }
         savePositions();
         await handlePositions(msg.chat.id);
+      } else if (text === '/block') {
+        const block = await provider.getBlockNumber().catch(() => 'N/A');
+        await telegramBot.sendMessage(msg.chat.id, `Current block: ${block} (mainnet)`);
+      } else if (text.startsWith('/setminout ')) {
+        const val = parseInt(text.split(' ')[1]);
+        if (val >= 0) {
+          globalThis.MIN_OUT = BigInt(val);
+          await sendTg(`MinOut set to ${val} (runtime for buys).`);
+        } else {
+          await sendTg('Usage: /setminout <number>');
+        }
+      } else if (text === '/lastsells') {
+        // Simple: list recent from positions or note
+        await sendTg('Recent sells logged in /p or pm2 logs. Use /pnl for summary.');
       } else if (text === '/config') {
         const cfgText = `⚙️ Config (runtime + file):\n` +
           `RPC: ${RPC}\n` +
