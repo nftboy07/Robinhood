@@ -252,6 +252,7 @@ async function initTelegram() {
  /poll - Force poll
  /recent or /r - Recent launches
  /bal - Balance
+ /strategy - Show auto selling strategy
  /buy <amt> <addr> - Manual buy (with checks)
  /forcebuy <amt> <addr> - Force buy (bypass, for reverts)
  /setfactory 0x... - Set factory at runtime
@@ -330,6 +331,15 @@ Use buttons for fast actions. New launches auto-post buy buttons.`;
       } else if (text === '/bal' || text === '/balance') {
         const bal = await getBalance();
         await telegramBot.sendMessage(msg.chat.id, `Balance: ${ethers.formatEther(bal)} ETH`);
+      } else if (text === '/strategy' || text === '/strat') {
+        const stratText = `📈 Selling Strategy (auto running):\n` +
+          `TP Ladder: ${STRATEGY.tpLadder?.join(', ') || '0.5,1,2'}x (sell ${STRATEGY.tpSellPercents?.join('/') || '30/30/40'}%)\n` +
+          `Trailing: ${TRAILING * 100}% from peak\n` +
+          `Hard SL: ${STOP_LOSS * 100}%\n` +
+          `Re-entry on ${STRATEGY.reEntryDipPct || 30}% dip (max ${STRATEGY.maxReEntriesPerPosition || 2})\n` +
+          `Moonbag: ${STRATEGY.moonbagPct || 25}% held forever\n` +
+          `Auto DEX on graduation.`;
+        await telegramBot.sendMessage(msg.chat.id, stratText);
       } else if (text === '/diag' || text === '/d' || text === '/info') {
         await handleDiag(msg.chat.id);
       } else if (text === '/pause') {
