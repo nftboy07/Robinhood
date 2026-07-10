@@ -729,7 +729,10 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
         } else {
           await telegramBot.sendMessage(msg.chat.id, 'No recent launches tracked.');
         }
+      } else if (text === '/import') {
+        await importTokensFromBlockscout(msg.chat.id);
       } else if (text === '/refresh' || text === '/fixpos') {
+        await importTokensFromBlockscout(msg.chat.id).catch(() => {});
         await sendTg('Refreshing positions from on-chain...');
         for (const p of positions) {
           const taddr = p.token || p.curve;
@@ -959,6 +962,7 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
         if (positions.length > 0) await handlePositions(chatId);
         else await sendMainMenu(chatId, `✅ All stale positions cleared.`);
       } else if (data === 'refresh' || data === 'fixpos') {
+        await importTokensFromBlockscout(chatId).catch(() => {});
         await sendTg('Refreshing positions from on-chain...');
         for (const p of positions) {
           const taddr = p.token || p.curve;
@@ -1410,6 +1414,78 @@ async function handleStatus(chatId) {
   }
 
   await telegramBot.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true });
+}
+
+async function importTokensFromBlockscout(chatId) {
+  try {
+    await sendTg('⏳ Checking Blockscout for on-chain token balances to import...');
+    
+    const url = `https://robinhoodchain.blockscout.com/api/v2/addresses/${wallet.address}/token-balances`;
+    
+    const https = require('https');
+    const rawData = await new Promise((resolve, reject) => {
+      https.get(url, (res) => {
+        let body = '';
+        res.on('data', (chunk) => body += chunk);
+        res.on('end', () => resolve(body));
+      }).on('error', reject);
+    });
+
+    const items = JSON.parse(rawData);
+    if (!Array.isArray(items)) {
+      await sendTg('❌ Failed to parse token balances from Blockscout.');
+      return;
+    }
+
+    let importedCount = 0;
+    const importedSymbols = [];
+
+    for (const item of items) {
+      if (!item.token || item.token.type !== 'ERC-20') continue;
+      const tokenAddr = item.token.address_hash.toLowerCase();
+      const value = item.value || '0';
+      const bal = BigInt(value);
+      if (bal === 0n) continue;
+
+      // Skip native wrapped tokens
+      if (WETH && tokenAddr === WETH.toLowerCase()) continue;
+
+      // Check if already in positions
+      const exists = positions.some(p => (p.token || p.curve).toLowerCase() === tokenAddr);
+      if (exists) continue;
+
+      const name = item.token.name || 'Unknown';
+      const symbol = item.token.symbol || '???';
+      const sym = `${name} (${symbol})`;
+
+      // Get current price if possible
+      const price = await getLivePrice(tokenAddr, tokenAddr).catch(() => 0n);
+
+      positions.push({
+        curve: tokenAddr,
+        token: tokenAddr,
+        symbol: sym,
+        amount: bal,
+        entryPrice: price, // set to current price to track gains from import point
+        highestPrice: price,
+        isMigrated: true, // assume DEX fallback is safest for old holdings
+        entryBlock: 0,
+        soldAmount: 0n,
+        reEntries: 0,
+        tpReached: []
+      });
+
+      importedCount++;
+      importedSymbols.push(symbol);
+    }
+
+    if (importedCount > 0) {
+      savePositions();
+      await sendTg(`✅ Imported ${importedCount} token(s) from your wallet: ${importedSymbols.join(', ')}\n\nThey are now tracked in your positions list!`);
+    }
+  } catch (e) {
+    logger.warn('Failed to import tokens from Blockscout: ' + e.message);
+  }
 }
 
 async function handlePositions(chatId) {
