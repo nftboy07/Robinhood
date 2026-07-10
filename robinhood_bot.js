@@ -2431,7 +2431,7 @@ async function sellPosition(pos, exitType = 'MANUAL') {
   const posKey = pos.token || pos.curve;
   const sellAmt = pos.amount;
 
-  // Graduated token: only attempt DEX sell if ROUTER and WETH are both configured
+  // Graduated token: try DEX sell (sellOnDex silently skips if no pool exists)
   if (pos.isMigrated && ROUTER && WETH) {
     const exitPrice = await getLivePrice(posKey, posCurve);
     const txHash = await sellOnDex(posKey, sellAmt);
@@ -2439,10 +2439,8 @@ async function sellPosition(pos, exitType = 'MANUAL') {
       logTradeToHistory(pos, sellAmt, exitPrice, txHash, exitType);
       positions = positions.filter(p => (p.token || p.curve) !== posKey);
       savePositions();
-    } else {
-      logger.warn(`[HOLD] ${pos.symbol} graduated - DEX sell failed. Holding.`);
-      await sendTg(`⚠️ <b>${pos.symbol}</b> graduated but no DEX sell available. Holding - sell manually.`);
     }
+    // If null: pool doesn't exist yet - silent hold, manageSafeStrategy skips graduated
     return;
   }
   // If graduated but no ROUTER/WETH configured: skip - position stays, no SL loop
@@ -2582,6 +2580,13 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
     return;
   }
 
+  // Graduated tokens: no automated selling until DEX pool exists.
+  // sellOnDex will silently skip if no pool. Avoid SL/TP spam loops.
+  if (pos.isMigrated) {
+    logger.debug(`[HOLD] ${pos.symbol} graduated - skipping SL/TP until DEX pool available`);
+    return;
+  }
+
   const peak = Number(pos.highestPrice);
   const trailingPrice = peak * (1 - TRAILING);
 
@@ -2591,14 +2596,12 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
   const sellableAmount = remainingAmount > moonbagAmount ? remainingAmount - moonbagAmount : 0n;
 
   if (sellableAmount <= 0n) {
-    // Only moonbag left - hold for potential moon
-    logger.info(`[MOONBAG] ${pos.symbol} - Only ${moonbagPct}% moonbag remaining. Holding for moonshot.`);
+    logger.debug(`[MOONBAG] ${pos.symbol} - moonbag only, holding.`);
     return;
   }
 
-  // 1. Hard Stop Loss - protect capital fast (sell everything, even moonbag on hard rugs)
-  // Skip if slPaused (graduated token with no DEX - avoid infinite retry loop)
-  if (pnlPct <= -STOP_LOSS * 100 && !pos.slPaused) {
+  // 1. Hard Stop Loss
+  if (pnlPct <= -STOP_LOSS * 100) {
     logger.info(`[SL] ${pos.symbol} PnL ${pnlPct.toFixed(1)}% - Selling for capital protection`);
     await sendTg(`🛡️ SL hit on <b>${pos.symbol}</b> (${pnlPct.toFixed(1)}%) - Protecting capital`);
     await sellPosition(pos, 'STOP_LOSS');
