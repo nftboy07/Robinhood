@@ -26,10 +26,12 @@ class MempoolMonitor {
       this.logger.info(`[MEMPOOL] Connecting to WS: ${this.wsUrl}...`);
       this.provider = new ethers.WebSocketProvider(this.wsUrl);
       this.isRunning = true;
+      this.lastMessageTime = Date.now();
 
       // Handle pending txs
       this.provider.on('pending', async (txHash) => {
         if (!this.isRunning) return;
+        this.lastMessageTime = Date.now(); // update watchdog timestamp
         try {
           const tx = await Promise.race([
             this.provider.getTransaction(txHash),
@@ -77,6 +79,37 @@ class MempoolMonitor {
         });
       }
 
+      // Ping Interval: Send ping every 25s, verify connection responds
+      this.pingInterval = setInterval(() => {
+        if (!this.isRunning || !this.provider) return;
+        this.logger.debug('[MEMPOOL] Sending WS ping heartbeat...');
+        let ponged = false;
+        const pingTimeout = setTimeout(() => {
+          if (!ponged && this.isRunning) {
+            this.logger.warn('[MEMPOOL] WS ping timeout - restarting connection');
+            this.cleanup();
+            this.start();
+          }
+        }, 5000);
+
+        this.provider.send('eth_blockNumber', []).then(() => {
+          ponged = true;
+          clearTimeout(pingTimeout);
+          this.lastMessageTime = Date.now();
+        }).catch(() => {
+          // ignore / let timeout handle it
+        });
+      }, 25000);
+
+      // Watchdog watchdogInterval: check if no mempool logs seen for 90 seconds
+      this.watchdogInterval = setInterval(() => {
+        if (Date.now() - this.lastMessageTime > 90000 && this.isRunning) {
+          this.logger.warn('[MEMPOOL] No WS mempool activity for 90s (Watchdog) - reconnecting');
+          this.cleanup();
+          this.start();
+        }
+      }, 10000);
+
       this.logger.info('[MEMPOOL] WS Mempool Monitor active.');
     } catch (e) {
       this.logger.warn(`[MEMPOOL] Failed to start WS monitor: ${e.message}`);
@@ -100,6 +133,14 @@ class MempoolMonitor {
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
+    }
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval);
+      this.watchdogInterval = null;
     }
     if (this.provider) {
       try {

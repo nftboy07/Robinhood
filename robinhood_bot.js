@@ -83,7 +83,15 @@ const TRAILING = config.trailingStopPct ?? 0.08;
 const POLL_MS = config.pollIntervalMs || 1100;
 let GAS_MULT = config.gasMultiplier || 1.8;
 let MAX_POS = config.maxConcurrentPositions || 8;
-const POSITIONS_FILE = config.positionsFile || 'positions.json';
+let POSITIONS_FILE = config.positionsFile || 'positions.json';
+let TRADES_HISTORY_FILE = 'trades_history.json';
+
+function updateTradingMode(isPaper) {
+  globalThis.paperTrading = isPaper;
+  POSITIONS_FILE = isPaper ? 'paper_positions.json' : (config.positionsFile || 'positions.json');
+  TRADES_HISTORY_FILE = isPaper ? 'paper_trades_history.json' : 'trades_history.json';
+  logger.info(`[MODE] Switched to ${isPaper ? 'PAPER TRADING (SIMULATION)' : 'LIVE TRADING'} mode`);
+}
 
 const EXPLORER = 'https://robinhoodchain.blockscout.com';
 
@@ -93,6 +101,7 @@ const MAX_DAILY_LOSS_PCT = config.maxDailyLossPct ?? 25;
 const MAX_TRADES_PER_HOUR = config.maxTradesPerHour ?? 12;
 let SLIPPAGE_PCT = config.slippagePct ?? 15;
 const ENABLE_TG = config.enableTelegram !== false;
+const TIME_LIMIT_SECS = config.timeLimitSeconds ?? 600; // default 10 minutes auto-exit
 
 // Strategy config (safe small amount sniping) - LIVE MAINNET
 const STRATEGY = config.strategy || {
@@ -111,12 +120,57 @@ let SNIPE_AMOUNT = ethers.parseEther( String(config.snipeAmountEth || '0.0001') 
 // Custom chain 4663 - static network to avoid ENS lookups and errors
 // Support backup RPCs (add to config.json "rpcs": ["primary", "backup..."]) for reliability
 const network = new ethers.Network('robinhood', 4663);
-const provider = new ethers.JsonRpcProvider(
-  RPCS[0] || 'https://rpc.mainnet.chain.robinhood.com',
-  network,
-  { staticNetwork: network }
-);
-const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+let currentRpc = RPCS[0] || 'https://rpc.mainnet.chain.robinhood.com';
+let provider = new ethers.JsonRpcProvider(currentRpc, network, { staticNetwork: network });
+let wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+let directProvider = new ethers.JsonRpcProvider(currentRpc, network, { staticNetwork: network });
+
+function switchRpc(newRpc) {
+  if (currentRpc === newRpc) return;
+  logger.info(`[RPC] Switching active RPC to: ${newRpc}`);
+  currentRpc = newRpc;
+  provider = new ethers.JsonRpcProvider(newRpc, network, { staticNetwork: network });
+  wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+  directProvider = new ethers.JsonRpcProvider(newRpc, network, { staticNetwork: network });
+}
+
+function triggerRpcFailover() {
+  if (RPCS.length <= 1) return;
+  const currentIndex = RPCS.indexOf(currentRpc);
+  const nextIndex = (currentIndex + 1) % RPCS.length;
+  const nextRpc = RPCS[nextIndex];
+  logger.warn(`[RPC] Request failed on active RPC. Triggering failover to: ${nextRpc}`);
+  switchRpc(nextRpc);
+}
+
+async function testRpcLatencies() {
+  if (RPCS.length <= 1) return;
+  logger.debug('[RPC] Running periodic latency test...');
+  let fastestRpc = currentRpc;
+  let minLatency = 999999;
+  
+  for (const rpc of RPCS) {
+    const start = Date.now();
+    try {
+      const tempProvider = new ethers.JsonRpcProvider(rpc, network, { staticNetwork: network });
+      await Promise.race([
+        tempProvider.getBlockNumber(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 4000))
+      ]);
+      const latency = Date.now() - start;
+      logger.debug(`  - ${rpc}: ${latency}ms`);
+      if (latency < minLatency) {
+        minLatency = latency;
+        fastestRpc = rpc;
+      }
+    } catch (e) {
+      logger.debug(`  - ${rpc}: Failed (${e.message.slice(0, 40)})`);
+    }
+  }
+  if (fastestRpc !== currentRpc) {
+    switchRpc(fastestRpc);
+  }
+}
 
 // ====================== LOGGING ======================
 const logger = winston.createLogger({
@@ -153,6 +207,7 @@ const routerABI = [
 ];
 
 // ====================== STATE ======================
+globalThis.paperTrading = config.paperTrading === true;
 let positions = [];
 let lastPolledBlock = 0;
 let telegramBot = null;
@@ -1066,6 +1121,11 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
       } else if (data === 'cfg_pos_down') {
         MAX_POS = Math.max(MAX_POS - 1, 1);
         await handleDashboardEdit(chatId, query.message.message_id);
+      } else if (data === 'toggle_paper') {
+        const nextMode = !globalThis.paperTrading;
+        updateTradingMode(nextMode);
+        await sendTg(nextMode ? '🧪 Switched to <b>PAPER TRADING</b> mode' : '🟢 Switched to <b>LIVE TRADING</b> mode');
+        await handleDashboardEdit(chatId, query.message.message_id);
       }
     });
 
@@ -1144,64 +1204,82 @@ async function sendBuyMenu(tokenAddr, fallbackSymbol = "NEW", nameAddr = null) {
 }
 
 // General buy function for variable amount
+// General buy function for variable amount
 async function buyToken(curveAddress, amountStr) {
   const buyAmount = ethers.parseEther(amountStr);
   logger.info(`[MANUAL BUY] ${curveAddress} for ${amountStr} ETH`);
 
-  const curve = new ethers.Contract(FACTORY, curveABI, wallet);
   try {
-    const feeData = await provider.getFeeData();
-    const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
+    let txHash, blockNumber, amount, entryPrice, actualToken;
+    let info = await getTokenInfo(curveAddress);
+    actualToken = curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
 
-    let tokenForBal = curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
-    const balBefore = await getTokenBalance(tokenForBal, wallet.address);
+    if (globalThis.paperTrading) {
+      txHash = '0xsim' + Math.random().toString(16).slice(2).padStart(60, '0');
+      blockNumber = await provider.getBlockNumber().catch(() => 9999999);
+      const estOut = await estimateBuyOutput(curveAddress, buyAmount);
+      amount = estOut || (buyAmount * (10n ** 18n) / (await getCurrentPrice(curveAddress) || 1n));
+      if (amount === 0n) amount = 1000n * (10n**18n); // default safe
+      entryPrice = await getCurrentPrice(curveAddress);
+      if (entryPrice === 0n) entryPrice = (buyAmount * (10n ** 18n)) / amount;
+      
+      logger.info(`[PAPER BOUGHT] tx: ${txHash}`);
+      await sendTg(`🧪 <b>[PAPER TRADE]</b> Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>`);
+    } else {
+      const curve = new ethers.Contract(FACTORY, curveABI, wallet);
+      const feeData = await provider.getFeeData();
+      const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    let minOut = 0n;
-    let gasEst = 300000n;
-    try {
-      gasEst = await curve.buy.estimateGas(curveAddress, { value: buyAmount });
-    } catch (e) {
-      // estimate may fail due to sim funds, use fixed
-    }
+      let tokenForBal = curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
+      const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
-    const tx = await curve.buy(curveAddress, {
-      value: buyAmount,
-      gasLimit: gasEst * 140n / 100n,
-      maxFeePerGas: maxFee,
-      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
-    });
-    const receipt = await withTimeout(tx.wait(), 120000, 'buy tx.wait');
-    const txHash = receipt.hash || receipt.transactionHash || 'unknown';
-    const txLink = `${EXPLORER}/tx/${txHash}`;
-
-    // Use log parsing first for real received amount (curve vs token mismatch safe)
-    const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
-    const fromLog = rec.amount;
-    let actualToken = rec.token || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
-    const balAfter = await getTokenBalance(actualToken, wallet.address);
-    let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
-    if (amount === 0n) {
-      // Strong fallback for new tokens: post-buy balance on the discovered token is the received amount
-      const postBal = await getTokenBalance(actualToken, wallet.address);
-      if (postBal > 0n) {
-        amount = postBal;
+      let minOut = 0n;
+      let gasEst = 300000n;
+      try {
+        gasEst = await curve.buy.estimateGas(curveAddress, { value: buyAmount });
+      } catch (e) {
+        // estimate may fail due to sim funds, use fixed
       }
-    }
-    if (amount === 0n) {
-      logger.warn(`[BUY] No tokens received for ${curveAddress}`);
-      await sendTg(`⚠️ Buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue. <a href="${txLink}">Check tx</a>`);
-      return;
-    }
 
-    let entryPrice = await getCurrentPrice(curveAddress);
-    if (entryPrice === 0n && amount > 0n) {
-      entryPrice = (buyAmount * (10n ** 18n)) / amount;
-    }
-    const info = await getTokenInfo(curveAddress);
+      const tx = await curve.buy(curveAddress, {
+        value: buyAmount,
+        gasLimit: gasEst * 140n / 100n,
+        maxFeePerGas: maxFee,
+        maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
+      });
+      const receipt = await withTimeout(tx.wait(), 120000, 'buy tx.wait');
+      txHash = receipt.hash || receipt.transactionHash || 'unknown';
+      blockNumber = receipt.blockNumber;
+      const txLink = `${EXPLORER}/tx/${txHash}`;
 
-    logger.info(`[BOUGHT] tx: ${txHash}`);
-    await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
-    await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
+      // Use log parsing first for real received amount (curve vs token mismatch safe)
+      const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
+      const fromLog = rec.amount;
+      actualToken = rec.token || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
+      const balAfter = await getTokenBalance(actualToken, wallet.address);
+      amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
+      if (amount === 0n) {
+        // Strong fallback for new tokens: post-buy balance on the discovered token is the received amount
+        const postBal = await getTokenBalance(actualToken, wallet.address);
+        if (postBal > 0n) {
+          amount = postBal;
+        }
+      }
+      if (amount === 0n) {
+        logger.warn(`[BUY] No tokens received for ${curveAddress}`);
+        await sendTg(`⚠️ Buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue. <a href="${txLink}">Check tx</a>`);
+        return;
+      }
+
+      entryPrice = await getCurrentPrice(curveAddress);
+      if (entryPrice === 0n && amount > 0n) {
+        entryPrice = (buyAmount * (10n ** 18n)) / amount;
+      }
+
+      logger.info(`[BOUGHT] tx: ${txHash}`);
+      await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
+      await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
+    }
 
     // Check if already have position
     const existing = positions.find(p => (p.curve || p.token) === curveAddress || p.token === curveAddress);
@@ -1216,10 +1294,12 @@ async function buyToken(curveAddress, amountStr) {
         entryPrice,
         highestPrice: entryPrice,
         isMigrated: false,
-        entryBlock: receipt.blockNumber,
+        entryBlock: blockNumber,
         soldAmount: 0n,
         reEntries: 0,
-        tpReached: []
+        tpReached: [],
+        entryTime: Date.now(),
+        isPaper: !!globalThis.paperTrading
       });
     }
     savePositions();
@@ -1233,57 +1313,74 @@ async function forceBuy(curveAddress, amountStr) {
   const buyAmount = ethers.parseEther(amountStr);
   logger.info(`[FORCE BUY] ${curveAddress} for ${amountStr} ETH (bypassing checks)`);
 
-  const curve = new ethers.Contract(FACTORY, curveABI, wallet);
   try {
-    const feeData = await provider.getFeeData();
-    const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
+    let txHash, blockNumber, amount, entryPrice, actualToken;
+    let info = await getTokenInfo(curveAddress);
+    actualToken = curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
 
-    let tokenForBal = curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
-    const balBefore = await getTokenBalance(tokenForBal, wallet.address);
+    if (globalThis.paperTrading) {
+      txHash = '0xsim' + Math.random().toString(16).slice(2).padStart(60, '0');
+      blockNumber = await provider.getBlockNumber().catch(() => 9999999);
+      const estOut = await estimateBuyOutput(curveAddress, buyAmount);
+      amount = estOut || (buyAmount * (10n ** 18n) / (await getCurrentPrice(curveAddress) || 1n));
+      if (amount === 0n) amount = 1000n * (10n**18n); // default safe
+      entryPrice = await getCurrentPrice(curveAddress);
+      if (entryPrice === 0n) entryPrice = (buyAmount * (10n ** 18n)) / amount;
+      
+      logger.info(`[PAPER FORCE BOUGHT] tx: ${txHash}`);
+      await sendTg(`🧪 <b>[PAPER TRADE]</b> Force Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>`);
+    } else {
+      const curve = new ethers.Contract(FACTORY, curveABI, wallet);
+      const feeData = await provider.getFeeData();
+      const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
-    let minOut = 0n;
-    let gasEst = 300000n;
-    try {
-      gasEst = await curve.buy.estimateGas(curveAddress, { value: buyAmount });
-    } catch (e) {
-      gasEst = 300000n;
-    }
+      let tokenForBal = curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
+      const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
-    const tx = await curve.buy(curveAddress, {
-      value: buyAmount,
-      gasLimit: gasEst * 150n / 100n,
-      maxFeePerGas: maxFee,
-      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
-    });
-    const receipt = await withTimeout(tx.wait(), 120000, 'forcebuy tx.wait');
-    const txHash = receipt.hash || receipt.transactionHash || 'unknown';
-    const txLink = `${EXPLORER}/tx/${txHash}`;
-
-    const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
-    const fromLog = rec.amount;
-    let actualToken = rec.token || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
-    const balAfter = await getTokenBalance(actualToken, wallet.address);
-    let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
-    if (amount === 0n) {
-      const postBal = await getTokenBalance(actualToken, wallet.address);
-      if (postBal > 0n) {
-        amount = postBal;
+      let minOut = 0n;
+      let gasEst = 300000n;
+      try {
+        gasEst = await curve.buy.estimateGas(curveAddress, { value: buyAmount });
+      } catch (e) {
+        gasEst = 300000n;
       }
-    }
-    if (amount === 0n) {
-      logger.warn(`[FORCE BUY] No tokens received for ${curveAddress}`);
-      await sendTg(`⚠️ Force buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue. <a href="${txLink}">Check tx</a>`);
-      return;
-    }
-    let entryPrice = await getCurrentPrice(curveAddress);
-    if (entryPrice === 0n && amount > 0n) {
-      entryPrice = (buyAmount * (10n ** 18n)) / amount;
-    }
-    const info = await getTokenInfo(curveAddress);
 
-    logger.info(`[FORCE BOUGHT] tx: ${txHash}`);
-    await sendAlert(`✅ Force Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
-    await sendTg(`✅ Force Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
+      const tx = await curve.buy(curveAddress, {
+        value: buyAmount,
+        gasLimit: gasEst * 150n / 100n,
+        maxFeePerGas: maxFee,
+        maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
+      });
+      const receipt = await withTimeout(tx.wait(), 120000, 'forcebuy tx.wait');
+      txHash = receipt.hash || receipt.transactionHash || 'unknown';
+      blockNumber = receipt.blockNumber;
+      const txLink = `${EXPLORER}/tx/${txHash}`;
+
+      const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
+      const fromLog = rec.amount;
+      actualToken = rec.token || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
+      const balAfter = await getTokenBalance(actualToken, wallet.address);
+      amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : 0n);
+      if (amount === 0n) {
+        const postBal = await getTokenBalance(actualToken, wallet.address);
+        if (postBal > 0n) {
+          amount = postBal;
+        }
+      }
+      if (amount === 0n) {
+        logger.warn(`[FORCE BUY] No tokens received for ${curveAddress}`);
+        await sendTg(`⚠️ Force buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue. <a href="${txLink}">Check tx</a>`);
+        return;
+      }
+      entryPrice = await getCurrentPrice(curveAddress);
+      if (entryPrice === 0n && amount > 0n) {
+        entryPrice = (buyAmount * (10n ** 18n)) / amount;
+      }
+
+      logger.info(`[FORCE BOUGHT] tx: ${txHash}`);
+      await sendAlert(`✅ Force Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
+      await sendTg(`✅ Force Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
+    }
 
     const existing = positions.find(p => (p.curve || p.token) === curveAddress || p.token === curveAddress);
     if (existing) {
@@ -1297,10 +1394,12 @@ async function forceBuy(curveAddress, amountStr) {
         entryPrice,
         highestPrice: entryPrice,
         isMigrated: false,
-        entryBlock: receipt.blockNumber,
+        entryBlock: blockNumber,
         soldAmount: 0n,
         reEntries: 0,
-        tpReached: []
+        tpReached: [],
+        entryTime: Date.now(),
+        isPaper: !!globalThis.paperTrading
       });
     }
     savePositions();
@@ -1616,10 +1715,15 @@ async function handleDiag(chatId) {
 // If you want individual sell buttons in positions list, extend the callback handler there.
 
 // ====================== HELPERS ======================
+function getPositionsFile() {
+  return globalThis.paperTrading ? 'paper_positions.json' : POSITIONS_FILE;
+}
+
 function loadPositions() {
   try {
-    if (fs.existsSync(POSITIONS_FILE)) {
-      const raw = JSON.parse(fs.readFileSync(POSITIONS_FILE, 'utf8'));
+    const file = getPositionsFile();
+    if (fs.existsSync(file)) {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
       positions = raw.map(p => ({
         ...p,
         curve: p.curve || p.token,
@@ -1639,6 +1743,8 @@ function loadPositions() {
           }
         }
       });
+    } else {
+      positions = [];
     }
   } catch (e) {}
 }
@@ -1653,7 +1759,7 @@ function savePositions() {
       soldAmount: (p.soldAmount || 0n).toString(),
       reEntries: p.reEntries || 0
     }));
-    fs.writeFileSync(POSITIONS_FILE, JSON.stringify(serial, null, 2));
+    fs.writeFileSync(getPositionsFile(), JSON.stringify(serial, null, 2));
   } catch (e) {}
 }
 
@@ -1666,6 +1772,7 @@ async function withRetry(fn, retries = 3, timeoutMs = 15000) {
       ]);
       return result;
     } catch (e) {
+      triggerRpcFailover(); // Trigger RPC rotation on network/node error
       if (i === retries - 1) throw e;
       await new Promise(r => setTimeout(r, 600 * (i + 1)));
     }
@@ -1701,12 +1808,7 @@ async function getTokenBalance(tokenAddr, owner) {
   } catch { return 0n; }
 }
 
-// Direct single-RPC provider for balance queries (avoids FallbackProvider network-changed errors)
-const directProvider = new ethers.JsonRpcProvider(
-  RPCS[0] || 'https://rpc.mainnet.chain.robinhood.com',
-  new ethers.Network('robinhood', 4663),
-  { staticNetwork: new ethers.Network('robinhood', 4663) }
-);
+// directProvider is declared at the top and switches dynamically with RPC updates
 
 async function getBalance() {
   // Try FallbackProvider first, fall back to direct single RPC to avoid "network changed" returning 0
@@ -1781,16 +1883,17 @@ async function handleDashboard(chatId) {
   const block = await provider.getBlockNumber().catch(() => '?');
   const bal = await getBalance();
   const balEth = parseFloat(ethers.formatEther(bal)).toFixed(4);
-  const stats = db.getWinRateStats();
+  const stats = db.getWinRateStats(!!globalThis.paperTrading);
   const winRateStr = stats.totalTrades > 0 ? `${stats.winRate.toFixed(1)}%` : 'N/A';
   
   const text = `🖥️ <b>Robinhood Bot Dashboard</b>\n` +
     `--------------------------------\n` +
     `Status: ${isPaused ? '⏸️ PAUSED' : '▶️ RUNNING'}\n` +
+    `Trading Mode: ${globalThis.paperTrading ? '🧪 <b>PAPER (SIMULATION)</b>' : '🟢 <b>LIVE</b>'}\n` +
     `Wallet: <code>${wallet.address}</code>\n` +
     `Balance: <b>${balEth} ETH</b>\n` +
     `Current Block: ${block}\n\n` +
-    `📈 <b>Performance (All-Time)</b>\n` +
+    `📈 <b>Performance (All-Time ${globalThis.paperTrading ? 'Paper' : 'Live'})</b>\n` +
     `Realized PnL: <b>${stats.totalRealizedPnl.toFixed(6)} ETH</b>\n` +
     `Total Trades: ${stats.totalTrades} (${stats.wins} W / ${stats.losses} L)\n` +
     `Win Rate: ${winRateStr}\n\n` +
@@ -1806,6 +1909,9 @@ async function handleDashboard(chatId) {
       [
         { text: isPaused ? '▶️ Resume Bot' : '⏸️ Pause Bot', callback_data: 'toggle_pause' },
         { text: '🔄 Refresh', callback_data: 'dash_refresh' }
+      ],
+      [
+        { text: globalThis.paperTrading ? '🟢 Switch to LIVE' : '🧪 Switch to PAPER', callback_data: 'toggle_paper' }
       ],
       [
         { text: '💵 Snipe: +0.0001', callback_data: 'cfg_snipe_up' },
@@ -1835,16 +1941,17 @@ async function handleDashboardEdit(chatId, messageId) {
     const block = await provider.getBlockNumber().catch(() => '?');
     const bal = await getBalance();
     const balEth = parseFloat(ethers.formatEther(bal)).toFixed(4);
-    const stats = db.getWinRateStats();
+    const stats = db.getWinRateStats(!!globalThis.paperTrading);
     const winRateStr = stats.totalTrades > 0 ? `${stats.winRate.toFixed(1)}%` : 'N/A';
     
     const text = `🖥️ <b>Robinhood Bot Dashboard</b>\n` +
       `--------------------------------\n` +
       `Status: ${isPaused ? '⏸️ PAUSED' : '▶️ RUNNING'}\n` +
+      `Trading Mode: ${globalThis.paperTrading ? '🧪 <b>PAPER (SIMULATION)</b>' : '🟢 <b>LIVE</b>'}\n` +
       `Wallet: <code>${wallet.address}</code>\n` +
       `Balance: <b>${balEth} ETH</b>\n` +
       `Current Block: ${block}\n\n` +
-      `📈 <b>Performance (All-Time)</b>\n` +
+      `📈 <b>Performance (All-Time ${globalThis.paperTrading ? 'Paper' : 'Live'})</b>\n` +
       `Realized PnL: <b>${stats.totalRealizedPnl.toFixed(6)} ETH</b>\n` +
       `Total Trades: ${stats.totalTrades} (${stats.wins} W / ${stats.losses} L)\n` +
       `Win Rate: ${winRateStr}\n\n` +
@@ -1860,6 +1967,9 @@ async function handleDashboardEdit(chatId, messageId) {
         [
           { text: isPaused ? '▶️ Resume Bot' : '⏸️ Pause Bot', callback_data: 'toggle_pause' },
           { text: '🔄 Refresh', callback_data: 'dash_refresh' }
+        ],
+        [
+          { text: globalThis.paperTrading ? '🟢 Switch to LIVE' : '🧪 Switch to PAPER', callback_data: 'toggle_paper' }
         ],
         [
           { text: '💵 Snipe: +0.0001', callback_data: 'cfg_snipe_up' },
@@ -1979,7 +2089,7 @@ async function sendTxWithBumping(contractCallFn, label = 'tx') {
   });
 }
 
-const TRADES_HISTORY_FILE = 'trades_history.json';
+// TRADES_HISTORY_FILE is declared as let at the top of the file
 
 // Fetch live price from either curve or DEX fallback
 async function getLivePrice(tokenAddress, curveAddress = null) {
@@ -2071,7 +2181,29 @@ function getStatsText(blockNumber) {
     `Last block: ${blockNumber || '?'}`;
 }
 
-// Check holder distribution on Blockscout to screen rugs/whales
+// Verify that the deployed token contract bytecode matches the standard factory template
+async function checkBytecodeSimilarity(tokenAddress) {
+  try {
+    const code = await directProvider.getCode(tokenAddress).catch(() => '0x');
+    if (!code || code === '0x') {
+      logger.debug(`[SECURITY] Bytecode empty for ${tokenAddress} - could not verify`);
+      return true; // allow if code not retrieved (mempool case / block delay)
+    }
+    const STANDARD_LENGTH = 3324;
+    const STANDARD_PREFIX = '0x608060405234801561000f575f5ffd5b506004361061009b575f3560e01c806370a082311161006357806370a082311461';
+    if (code.length !== STANDARD_LENGTH || !code.startsWith(STANDARD_PREFIX)) {
+      logger.warn(`[SECURITY] Non-standard bytecode for ${tokenAddress} (len: ${code.length}) - potential backdoor/custom contract`);
+      return false;
+    }
+    logger.debug(`[SECURITY] Token bytecode matches factory template`);
+    return true;
+  } catch (e) {
+    logger.debug(`[SECURITY] Bytecode verification failed: ${e.message}`);
+    return true; // fail-open on network issues
+  }
+}
+
+// Check holder distribution on Blockscout to screen rugs/whales (top 10 sum > 35% or top 1 > 50%)
 async function checkHolderDistribution(tokenAddress, curveAddress) {
   try {
     const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/tokens/${tokenAddress}/holders`);
@@ -2085,31 +2217,38 @@ async function checkHolderDistribution(tokenAddress, curveAddress) {
       return false;
     }
 
-    let totalCirculating = 0n;
-    let maxIndividualHolder = 0n;
     const curveLower = curveAddress.toLowerCase();
     const zeroAddr = '0x0000000000000000000000000000000000000000';
 
-    for (const item of data.items) {
-      const holderAddr = (item.address && item.address.hash || '').toLowerCase();
-      const val = BigInt(item.value || '0');
-      
-      // Skip curve/factory and zero address
-      if (holderAddr === curveLower || holderAddr === zeroAddr || (FACTORY && holderAddr === FACTORY.toLowerCase())) {
-        continue;
+    const sortedHolders = data.items.map(item => ({
+      addr: (item.address && item.address.hash || '').toLowerCase(),
+      val: BigInt(item.value || '0')
+    })).filter(h => h.addr !== curveLower && h.addr !== zeroAddr && (FACTORY && h.addr !== FACTORY.toLowerCase()));
+
+    sortedHolders.sort((a, b) => (b.val > a.val ? 1 : -1));
+
+    let totalCirculating = 0n;
+    let top10Sum = 0n;
+    let counted = 0;
+
+    for (const h of sortedHolders) {
+      if (counted < 10) {
+        top10Sum += h.val;
+        counted++;
       }
-      
-      totalCirculating += val;
-      if (val > maxIndividualHolder) {
-        maxIndividualHolder = val;
-      }
+      totalCirculating += h.val;
     }
 
     if (totalCirculating > 0n) {
-      const maxPct = Number(maxIndividualHolder * 100n / totalCirculating);
-      logger.info(`[HOLDERS] ${tokenAddress} - Max individual holder holds ${maxPct}% of circulating supply`);
-      if (maxPct > 50) {
-        logger.warn(`[HOLDERS] Whale concentration high: ${maxPct}%`);
+      const top1Pct = Number((sortedHolders[0]?.val || 0n) * 100n / totalCirculating);
+      const top10Pct = Number(top10Sum * 100n / totalCirculating);
+      logger.info(`[HOLDERS] ${tokenAddress} - Top 1 holder: ${top1Pct}%, Top 10 holders: ${top10Pct}%`);
+      if (top1Pct > 50) {
+        logger.warn(`[HOLDERS] Whale concentration high (Top 1 > 50%): ${top1Pct}%`);
+        return true;
+      }
+      if (top10Pct > 35) {
+        logger.warn(`[HOLDERS] Insider concentration high (Top 10 > 35%): ${top10Pct}%`);
         return true;
       }
     }
@@ -2124,9 +2263,14 @@ async function checkHolderDistribution(tokenAddress, curveAddress) {
 async function isHoneypotOrBad(curveAddress, tokenAddr = null) {
   if (!HONEYPOT_CHECK) return false;
   try {
-    // 1. Holder concentration check
+    // 1. Security filters (Bytecode similarity & Holder concentration)
     const actualToken = tokenAddr || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
     if (actualToken && actualToken !== '0x0000000000000000000000000000000000000000') {
+      const isStandard = await checkBytecodeSimilarity(actualToken);
+      if (!isStandard) {
+        logger.warn(`[HONEYPOT] Skip launch due to custom non-standard bytecode on ${actualToken}`);
+        return true;
+      }
       const isConcentrated = await checkHolderDistribution(actualToken, curveAddress);
       if (isConcentrated) {
         logger.warn(`[HONEYPOT] Skip launch due to high holder concentration on ${actualToken}`);
@@ -2351,52 +2495,72 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
   }
 
   try {
-    let minOut = 0n;
-    let gasEst;
-    try {
-      gasEst = await curve.buy.estimateGas(curveAddress, { value: SNIPE_AMOUNT });
-    } catch (e) {
-      minOut = 0n;
-      gasEst = await curve.buy.estimateGas(curveAddress, { value: SNIPE_AMOUNT });
-    }
-    const feeData = await provider.getFeeData();
-    const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
+    let txHash, blockNumber, amount, entryPrice, actualToken;
+    let info = await getTokenInfo(curveAddress);
+    actualToken = tokenAddr || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
 
-    let tokenForBal = tokenAddr || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
-    const balBefore = await getTokenBalance(tokenForBal, wallet.address);
-
-    const tx = await curve.buy(curveAddress, {
-      value: SNIPE_AMOUNT,
-      gasLimit: gasEst * 145n / 100n,
-      maxFeePerGas: maxFee,
-      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
-    });
-
-    const receipt = await withTimeout(tx.wait(), 120000, 'snipe tx.wait');
-    const txHash = receipt.hash || receipt.transactionHash || 'unknown';
-    logger.info(`[BOUGHT] ${sym} tx: ${txHash}`);
-
-    const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
-    const fromLog = rec.amount;
-    let actualToken = rec.token || tokenAddr || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
-    const balAfter = await getTokenBalance(actualToken, wallet.address);
-    let amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : (estimated || 0n));
-    if (amount === 0n) {
-      const postBal = await getTokenBalance(actualToken, wallet.address);
-      if (postBal > 0n) {
-        amount = postBal;
+    if (globalThis.paperTrading) {
+      txHash = '0xsim' + Math.random().toString(16).slice(2).padStart(60, '0');
+      blockNumber = await provider.getBlockNumber().catch(() => 9999999);
+      amount = estimated || (SNIPE_AMOUNT * (10n ** 18n) / (await getCurrentPrice(curveAddress) || 1n));
+      if (amount === 0n) amount = 1000n * (10n**18n); // default safe
+      entryPrice = await getCurrentPrice(curveAddress);
+      if (entryPrice === 0n) entryPrice = (SNIPE_AMOUNT * (10n ** 18n)) / amount;
+      
+      logger.info(`[PAPER BOUGHT] ${sym} tx: ${txHash}`);
+      await sendTg(`🧪 <b>[PAPER TRADE]</b> Snipe bought <b>${sym}</b>\nEst. amount: ${ethers.formatEther(amount)}`);
+    } else {
+      let minOut = 0n;
+      let gasEst;
+      try {
+        gasEst = await curve.buy.estimateGas(curveAddress, { value: SNIPE_AMOUNT });
+      } catch (e) {
+        minOut = 0n;
+        gasEst = await curve.buy.estimateGas(curveAddress, { value: SNIPE_AMOUNT });
       }
+      const feeData = await provider.getFeeData();
+      const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
+
+      let tokenForBal = tokenAddr || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
+      const balBefore = await getTokenBalance(tokenForBal, wallet.address);
+
+      const tx = await curve.buy(curveAddress, {
+        value: SNIPE_AMOUNT,
+        gasLimit: gasEst * 145n / 100n,
+        maxFeePerGas: maxFee,
+        maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
+      });
+
+      const receipt = await withTimeout(tx.wait(), 120000, 'snipe tx.wait');
+      txHash = receipt.hash || receipt.transactionHash || 'unknown';
+      blockNumber = receipt.blockNumber;
+      logger.info(`[BOUGHT] ${sym} tx: ${txHash}`);
+
+      const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
+      const fromLog = rec.amount;
+      actualToken = rec.token || tokenAddr || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
+      const balAfter = await getTokenBalance(actualToken, wallet.address);
+      amount = fromLog > 0n ? fromLog : (balAfter > balBefore ? (balAfter - balBefore) : (estimated || 0n));
+      if (amount === 0n) {
+        const postBal = await getTokenBalance(actualToken, wallet.address);
+        if (postBal > 0n) {
+          amount = postBal;
+        }
+      }
+      if (amount === 0n) {
+        logger.warn(`[SNIPE] No tokens received for ${curveAddress}`);
+        await sendTg(`⚠️ Snipe tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
+        return;
+      }
+      entryPrice = await getCurrentPrice(curveAddress);
+      if (entryPrice === 0n && amount > 0n) {
+        entryPrice = (SNIPE_AMOUNT * (10n ** 18n)) / amount;
+      }
+      
+      const txLink = `${EXPLORER}/tx/${txHash}`;
+      await sendTg(`✅ Bought <b>${sym}</b> on fun.noxa.fi/robinhood\nEst. amount: ${ethers.formatEther(amount)}\n<a href="${txLink}">View tx</a>`);
+      await sendAlert(`✅ Snipe bought ${symbol}\n${txLink}`);
     }
-    if (amount === 0n) {
-      logger.warn(`[SNIPE] No tokens received for ${curveAddress}`);
-      await sendTg(`⚠️ Snipe tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue. <a href="${txLink}">Check tx</a>`);
-      return;
-    }
-    let entryPrice = await getCurrentPrice(curveAddress);
-    if (entryPrice === 0n && amount > 0n) {
-      entryPrice = (SNIPE_AMOUNT * (10n ** 18n)) / amount;
-    }
-    const info = await getTokenInfo(curveAddress);
 
     const storedToken = actualToken || tokenAddr || curveAddress;
     positions.push({ 
@@ -2407,17 +2571,15 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
       entryPrice, 
       highestPrice: entryPrice, 
       isMigrated: false, 
-      entryBlock: receipt.blockNumber,
+      entryBlock: blockNumber,
       soldAmount: 0n,
       reEntries: 0,
-      tpReached: [] // for ladder
+      tpReached: [], // for ladder
+      entryTime: Date.now(),
+      isPaper: !!globalThis.paperTrading
     });
     dailyStats.trades++;
     savePositions();
-
-    const txLink = `${EXPLORER}/tx/${txHash}`;
-    await sendTg(`✅ Bought <b>${sym}</b> on fun.noxa.fi/robinhood\nEst. amount: ${ethers.formatEther(amount)}\n<a href="${txLink}">View tx</a>`);
-    await sendAlert(`✅ Snipe bought ${symbol}\n${txLink}`);
   } catch (e) {
     logger.error(`[SNIPE FAIL] ${sym}: ${e.message}`);
     await sendTg(`❌ Snipe failed ${sym}`);
@@ -2426,10 +2588,22 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
 
 // ====================== SELL ======================
 async function sellPosition(pos, exitType = 'MANUAL') {
-  // LIVE mainnet - always attempt real sell
   const posCurve = pos.curve || pos.token;
   const posKey = pos.token || pos.curve;
   const sellAmt = pos.amount;
+
+  if (pos.isPaper || globalThis.paperTrading) {
+    const exitPrice = await getLivePrice(posKey, posCurve);
+    const txHash = '0xsim' + Math.random().toString(16).slice(2).padStart(60, '0');
+    logger.info(`[PAPER SOLD] ${pos.symbol} at price ${ethers.formatEther(exitPrice || 0n)}`);
+    await sendTg(`🧪 <b>[PAPER TRADE]</b> Sold <b>${pos.symbol}</b>`);
+    
+    logTradeToHistory(pos, sellAmt, exitPrice, txHash, exitType);
+    
+    positions = positions.filter(p => (p.token || p.curve) !== posKey);
+    savePositions();
+    return;
+  }
 
   // Graduated token: try DEX sell (sellOnDex silently skips if no pool exists)
   if (pos.isMigrated && ROUTER && WETH) {
@@ -2580,6 +2754,19 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
     return;
   }
 
+  // 0. Time-Based Stop-Loss (Auto-Exit after X seconds)
+  if (!pos.entryTime) {
+    pos.entryTime = Date.now();
+    savePositions();
+  }
+  const ageSecs = Math.floor((Date.now() - pos.entryTime) / 1000);
+  if (TIME_LIMIT_SECS > 0 && ageSecs >= TIME_LIMIT_SECS) {
+    logger.info(`[TIME EXIT] ${pos.symbol} reached time limit of ${TIME_LIMIT_SECS}s (${ageSecs}s) - executing auto-exit`);
+    await sendTg(`⏳ <b>Time limit reached</b> for ${pos.symbol} (${Math.floor(ageSecs/60)}m) - executing auto-exit`);
+    await sellPosition(pos, 'TIME_LIMIT');
+    return;
+  }
+
   // Graduated tokens: no automated selling until DEX pool exists.
   // sellOnDex will silently skip if no pool. Avoid SL/TP spam loops.
   if (pos.isMigrated) {
@@ -2663,17 +2850,31 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
         await sendTg(`🔄 Re-buying dip on ${pos.symbol} (${dipFromEntry.toFixed(0)}% down)`);
         
         try {
-          const curve = new ethers.Contract(FACTORY, curveABI, wallet);
-          const gasEst = await curve.buy.estimateGas(pos.token, { value: reAmount });
-          await curve.buy(pos.token, {
-            value: reAmount,
-            gasLimit: gasEst * 130n / 100n
-          });
-          pos.reEntries = (pos.reEntries || 0) + 1;
-          pos.amount += reAmount;
-          dailyStats.trades++;
-          savePositions();
-          logger.info(`[RE-ENTRY SUCCESS] ${pos.symbol}`);
+          if (pos.isPaper || globalThis.paperTrading) {
+            const estOut = await estimateBuyOutput(pos.token, reAmount);
+            const amountReceived = estOut || (reAmount * (10n ** 18n) / (currentPrice || 1n));
+            pos.reEntries = (pos.reEntries || 0) + 1;
+            pos.amount += amountReceived;
+            dailyStats.trades++;
+            savePositions();
+            logger.info(`[PAPER RE-ENTRY SUCCESS] ${pos.symbol}`);
+            await sendTg(`🧪 <b>[PAPER TRADE]</b> Re-buy successful on ${pos.symbol}`);
+          } else {
+            const curve = new ethers.Contract(FACTORY, curveABI, wallet);
+            const gasEst = await curve.buy.estimateGas(pos.token, { value: reAmount });
+            await curve.buy(pos.token, {
+              value: reAmount,
+              gasLimit: gasEst * 130n / 100n
+            });
+            pos.reEntries = (pos.reEntries || 0) + 1;
+            // Note: fixing standard reEntry bug where reAmount (ETH) was added to pos.amount (tokens)
+            const tokenEst = await estimateBuyOutput(pos.token, reAmount).catch(() => 0n);
+            const amountReceived = tokenEst > 0n ? tokenEst : reAmount; // fallback
+            pos.amount += amountReceived;
+            dailyStats.trades++;
+            savePositions();
+            logger.info(`[RE-ENTRY SUCCESS] ${pos.symbol}`);
+          }
         } catch (e) {
           logger.warn(`Re-entry failed for ${pos.symbol}: ${e.message}`);
         }
@@ -2899,6 +3100,7 @@ async function main() {
     logger.info(`Factory: ${FACTORY}`);
   }
 
+  updateTradingMode(config.paperTrading === true);
   loadPositions();
   await initTelegram();
 
@@ -2916,6 +3118,14 @@ async function main() {
 
   // First poll with safety
   try { await withTimeout(pollNewLaunches(), 30000, 'initial poll'); } catch (e) { logger.warn('initial poll issue: ' + e.message); }
+
+  // Set up RPC latency tester interval (every 60s)
+  if (RPCS.length > 1) {
+    testRpcLatencies().catch(() => {});
+    setInterval(() => {
+      testRpcLatencies().catch(() => {});
+    }, 60000);
+  }
 
   // Use the possibly runtime-tuned POLL_MS
   const pollInterval = globalThis.POLL_MS || POLL_MS || 2000;

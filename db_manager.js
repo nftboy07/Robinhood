@@ -5,6 +5,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const LAUNCHES_FILE = path.join(DATA_DIR, 'launches.json');
 const SAFETY_FILE = path.join(DATA_DIR, 'safety_logs.json');
 const TRADES_FILE = path.join(__dirname, 'trades_history.json'); // compatibility with existing history file
+const PAPER_TRADES_FILE = path.join(__dirname, 'paper_trades_history.json');
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -72,28 +73,32 @@ module.exports = {
     return list.find(l => l.token.toLowerCase() === tokenAddress.toLowerCase());
   },
 
-  // Trades database APIs (reads/writes to trades_history.json)
-  logTrade(tradeRecord) {
-    const list = readJSON(TRADES_FILE);
+  // Trades database APIs (reads/writes to trades_history.json or paper_trades_history.json)
+  logTrade(tradeRecord, isPaper = false) {
+    const file = isPaper ? PAPER_TRADES_FILE : TRADES_FILE;
+    const list = readJSON(file);
     list.push({
       timestamp: Date.now(),
       ...tradeRecord
     });
-    writeJSON(TRADES_FILE, list);
+    writeJSON(file, list);
   },
 
-  getTradeHistory(limit = 10) {
-    const list = readJSON(TRADES_FILE);
+  getTradeHistory(limit = 10, isPaper = false) {
+    const file = isPaper ? PAPER_TRADES_FILE : TRADES_FILE;
+    const list = readJSON(file);
     return list.slice(-limit).reverse();
   },
 
-  clearTradeHistory() {
-    writeJSON(TRADES_FILE, []);
+  clearTradeHistory(isPaper = false) {
+    const file = isPaper ? PAPER_TRADES_FILE : TRADES_FILE;
+    writeJSON(file, []);
   },
 
   // Win/Loss metrics calculator
-  getWinRateStats() {
-    const trades = readJSON(TRADES_FILE);
+  getWinRateStats(isPaper = false) {
+    const file = isPaper ? PAPER_TRADES_FILE : TRADES_FILE;
+    const trades = readJSON(file);
     if (!trades || trades.length === 0) {
       return { totalRealizedPnl: 0, totalTrades: 0, wins: 0, losses: 0, winRate: 0 };
     }
