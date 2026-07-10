@@ -2209,13 +2209,43 @@ function checkRiskLimits() {
   return true;
 }
 
-// Sell on DEX (Uniswap V2 style) after migration
+// Sell on DEX (Uniswap V2 style) after graduation
 async function sellOnDex(tokenAddress, tokenAmount) {
   if (!ROUTER || !WETH) {
-    logger.warn('No ROUTER/WETH configured - cannot sell on DEX. Update config.json with real addresses.');
+    logger.debug('No ROUTER/WETH configured - cannot sell on DEX.');
     return null;
   }
   try {
+    // 0. Check that a real liquidity pool exists BEFORE attempting anything
+    const DEX_FACTORY = config.dexFactory || '';
+    if (DEX_FACTORY) {
+      const ZERO = '0x0000000000000000000000000000000000000000';
+      let pair = ZERO;
+      try {
+        const dexFac = new ethers.Contract(DEX_FACTORY, ['function getPair(address,address) view returns (address)'], provider);
+        pair = await dexFac.getPair(tokenAddress, WETH);
+      } catch (e) {
+        logger.debug('[DEX SELL] getPair failed: ' + e.message.slice(0, 60));
+        return null;
+      }
+      if (!pair || pair.toLowerCase() === ZERO.toLowerCase()) {
+        logger.debug(`[DEX SELL] No liquidity pool for ${tokenAddress} yet - holding`);
+        return null;
+      }
+      // Check pool has reserves
+      try {
+        const pairC = new ethers.Contract(pair, ['function getReserves() view returns (uint112,uint112,uint32)'], provider);
+        const reserves = await pairC.getReserves();
+        if (reserves[0] === 0n && reserves[1] === 0n) {
+          logger.debug(`[DEX SELL] Pool empty reserves for ${tokenAddress} - holding`);
+          return null;
+        }
+      } catch (e) {
+        logger.debug('[DEX SELL] getReserves failed: ' + e.message.slice(0, 60));
+        return null;
+      }
+    }
+
     // 1. Approve router if needed
     const erc20ABI = [
       'function allowance(address owner, address spender) external view returns (uint256)',
@@ -2224,46 +2254,36 @@ async function sellOnDex(tokenAddress, tokenAmount) {
     const tokenContract = new ethers.Contract(tokenAddress, erc20ABI, wallet);
     const allowance = await tokenContract.allowance(wallet.address, ROUTER).catch(() => 0n);
     if (allowance < tokenAmount) {
-      logger.info(`Approving router to spend ${tokenAddress}...`);
-      await sendTg(`⚙️ Approving DEX router to spend ${tokenAddress}...`);
+      logger.info(`Approving router for ${tokenAddress}...`);
       const approveTx = await tokenContract.approve(ROUTER, ethers.MaxUint256, { gasLimit: 100000 });
       await approveTx.wait();
-      logger.info('Approval successful.');
     }
 
     const router = new ethers.Contract(ROUTER, routerABI, wallet);
     const path = [tokenAddress, WETH];
     const deadline = Math.floor(Date.now() / 1000) + 300;
 
-    // 2. Dynamic slippage check using getAmountsOut
     let minOut = 0n;
     try {
       const amounts = await router.getAmountsOut(tokenAmount, path);
       if (amounts && amounts.length >= 2) {
-        const expectedOut = amounts[1];
-        minOut = expectedOut * BigInt(100 - SLIPPAGE_PCT) / 100n;
-        logger.info(`DEX amountsOut expected: ${ethers.formatEther(expectedOut)} ETH | minOut (with slippage): ${ethers.formatEther(minOut)} ETH`);
+        minOut = amounts[1] * BigInt(100 - SLIPPAGE_PCT) / 100n;
       }
     } catch (e) {
-      logger.warn('Failed to estimate DEX amountsOut for slippage: ' + e.message);
+      logger.warn('getAmountsOut failed: ' + e.message);
     }
 
     const tx = await router.swapExactTokensForETHSupportingFeeOnTransferTokens(
-      tokenAmount,
-      minOut,
-      path,
-      wallet.address,
-      deadline,
-      { gasLimit: 600000 }
+      tokenAmount, minOut, path, wallet.address, deadline, { gasLimit: 600000 }
     );
     const receipt = await tx.wait();
     const txHash = receipt.hash || receipt.transactionHash;
     logger.info(`[DEX SELL] ${tokenAddress} tx: ${txHash}`);
-    await sendTg(`✅ Sold on DEX after graduation\nTx: <code>${txHash}</code>`);
+    await sendTg(`✅ Sold on DEX!\nTx: <code>${txHash}</code>`);
     return txHash;
   } catch (e) {
     logger.error('DEX sell failed: ' + e.message);
-    await sendTg(`❌ DEX sell failed: ${e.message.slice(0, 100)}`);
+    // No TG spam here - caller handles user messaging
     return null;
   }
 }
