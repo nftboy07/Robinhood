@@ -1139,7 +1139,7 @@ async function buyToken(curveAddress, amountStr) {
   const buyAmount = ethers.parseEther(amountStr);
   logger.info(`[MANUAL BUY] ${curveAddress} for ${amountStr} ETH`);
 
-  const curve = new ethers.Contract(curveAddress, curveABI, wallet);
+  const curve = new ethers.Contract(FACTORY, curveABI, wallet);
   try {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
@@ -1150,12 +1150,12 @@ async function buyToken(curveAddress, amountStr) {
     let minOut = 0n;
     let gasEst = 300000n;
     try {
-      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: buyAmount });
+      gasEst = await curve.buy.estimateGas(curveAddress, { value: buyAmount });
     } catch (e) {
       // estimate may fail due to sim funds, use fixed
     }
 
-    const tx = await curve.buy(minOut, wallet.address, {
+    const tx = await curve.buy(curveAddress, {
       value: buyAmount,
       gasLimit: gasEst * 140n / 100n,
       maxFeePerGas: maxFee,
@@ -2301,8 +2301,8 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
     if (price > 0n) break;
     // Also try: gas estimation as proxy for readiness
     try {
-      const curve_ = new ethers.Contract(curveAddress, curveABI, wallet);
-      await curve_.buy.estimateGas(0n, wallet.address, { value: SNIPE_AMOUNT });
+      const curve_ = new ethers.Contract(FACTORY, curveABI, wallet);
+      await curve_.buy.estimateGas(curveAddress, { value: SNIPE_AMOUNT });
       price = 1n; // estimateGas succeeded = curve is live
       break;
     } catch {}
@@ -2320,10 +2320,10 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
     let minOut = 0n;
     let gasEst;
     try {
-      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: SNIPE_AMOUNT });
+      gasEst = await curve.buy.estimateGas(curveAddress, { value: SNIPE_AMOUNT });
     } catch (e) {
       minOut = 0n;
-      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: SNIPE_AMOUNT });
+      gasEst = await curve.buy.estimateGas(curveAddress, { value: SNIPE_AMOUNT });
     }
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
@@ -2331,7 +2331,7 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
     let tokenForBal = tokenAddr || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
     const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
-    const tx = await curve.buy(minOut, wallet.address, {
+    const tx = await curve.buy(curveAddress, {
       value: SNIPE_AMOUNT,
       gasLimit: gasEst * 145n / 100n,
       maxFeePerGas: maxFee,
