@@ -2202,13 +2202,36 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
 
   const curve = new ethers.Contract(curveAddress, curveABI, wallet);
 
-  try {
-    const price = await getCurrentPrice(curveAddress);
-    if (price === 0n) {
-      logger.warn('Curve not ready');
-      return;
-    }
+  // Verify curve has code (topics[2] was creator wallet, not curve)
+  const curveCode = await directProvider.getCode(curveAddress).catch(() => '0x');
+  if (!curveCode || curveCode.length <= 2) {
+    logger.warn(`[SNIPE SKIP] ${curveAddress} has no code - not a real curve`);
+    return;
+  }
 
+  // Wait for curve to become ready (retry up to 6x, 2s apart = 12s max)
+  let price = 0n;
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    price = await getCurrentPrice(curveAddress).catch(() => 0n);
+    if (price > 0n) break;
+    // Also try: gas estimation as proxy for readiness
+    try {
+      const curve_ = new ethers.Contract(curveAddress, curveABI, wallet);
+      await curve_.buy.estimateGas(0n, wallet.address, { value: SNIPE_AMOUNT });
+      price = 1n; // estimateGas succeeded = curve is live
+      break;
+    } catch {}
+    if (attempt < 6) {
+      logger.debug(`[SNIPE] Curve not ready yet (attempt ${attempt}/6), retrying in 2s...`);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+  if (price === 0n) {
+    logger.warn(`[SNIPE SKIP] Curve still not ready after retries: ${curveAddress}`);
+    return;
+  }
+
+  try {
     let minOut = 0n;
     let gasEst;
     try {
@@ -2578,41 +2601,99 @@ async function pollNewLaunches() {
       }
     }
 
+    // Track seen tokens to avoid double-processing across overlapping scans
+    if (!global.seenLaunchTokens) global.seenLaunchTokens = new Set();
+
     for (const log of logs) {
       if (isPaused) break;
       try {
-        // Standard: topics[1] = token (ERC20 for balance/name), topics[2] = curve (for buy/sell/getPrice)
-        const tokenAddr = '0x' + log.topics[1].slice(-40);
-        let curveAddr = tokenAddr;
-        if (log.topics.length > 2 && log.topics[2] && log.topics[2] !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
-          curveAddr = '0x' + log.topics[2].slice(-40);
-        }
-        logger.info(`[NEW LAUNCH] curve: ${curveAddr} (token: ${tokenAddr}) on fun.noxa.fi/robinhood`);
-        curveToToken.set(curveAddr.toLowerCase(), tokenAddr.toLowerCase());
-        db.logLaunch(curveAddr, tokenAddr, DisplayName = "NEW");
-        // Fire-and-forget alerts / menus so one slow TG doesn't block poll loop
-        sendAlert(`🚀 New launch: ${curveAddr} on fun.noxa.fi/robinhood`).catch(()=>{});
-        sendTg(`🚀 New launch detected: <code>${curveAddr}</code>`).catch(()=>{});
-        sendBuyMenu(curveAddr, "NEW", tokenAddr).catch(()=>{});
-        // Get info + recent (non blocking for main poll)
-        getTokenInfo(tokenAddr).then(info => {
-          let display = `${info.name} (${info.symbol})`;
-          if (info.name === "Unknown Token") {
-            const short = tokenAddr.slice(0,6) + "..." + tokenAddr.slice(-4);
-            display = `Unnamed (${short})`;
-          }
-          recentLaunches.unshift({addr: curveAddr, symbol: display, time: Date.now()});
-          if (recentLaunches.length > 5) recentLaunches.pop();
-        }).catch(()=>{});
-        // Auto snipe uses curveAddr (buy target) - delayed
-        setTimeout(() => snipe(curveAddr, null, tokenAddr), 1500);
-      } catch (logErr) {
+        // === CORRECT EVENT STRUCTURE (verified on-chain 2026-07-10) ===
+        // topics[1] = token address (ERC20)
+        // topics[2] = creator wallet (NOT curve!) -- ignore
+        // data      = ABI-encoded (string name, string symbol, uint256)
+        // Real curve = non-factory contract with code in same tx receipt
+
+        const tokenAddr = ('0x' + log.topics[1].slice(-40)).toLowerCase();
+
+        // Deduplicate across overlapping scan windows
+        if (global.seenLaunchTokens.has(tokenAddr)) continue;
+        global.seenLaunchTokens.add(tokenAddr);
+        // Keep set from growing unbounded
+        if (global.seenLaunchTokens.size > 200) global.seenLaunchTokens.clear();
+
+        // Decode name + symbol from event data (ABI-encoded strings in data)
+        let tokenName = '???';
+        let tokenSymbol = '???';
         try {
-          const addr = '0x' + log.topics[1].slice(-40);
-          sendBuyMenu(addr, 'LAUNCH', addr).catch(()=>{});
-          recentLaunches.unshift({addr: addr, symbol: 'LAUNCH', time: Date.now()});
-          if (recentLaunches.length > 5) recentLaunches.pop();
-          setTimeout(() => snipe(addr, 'LAUNCH'), 1800);
+          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+            ['string', 'string', 'uint256'],
+            log.data
+          );
+          tokenName = decoded[0] || '???';
+          tokenSymbol = decoded[1] || '???';
+        } catch {}
+
+        // Find real curve contract from receipt (non-factory addr with code in same tx)
+        let curveAddr = tokenAddr;
+        try {
+          const receipt = await directProvider.getTransactionReceipt(log.transactionHash);
+          if (receipt) {
+            const seen = new Set([FACTORY.toLowerCase(), tokenAddr]);
+            for (const rlog of receipt.logs) {
+              const a = rlog.address.toLowerCase();
+              if (seen.has(a)) continue;
+              seen.add(a);
+              const code = await directProvider.getCode(a).catch(() => '0x');
+              if (code && code.length > 2) {
+                curveAddr = a;
+                break;
+              }
+            }
+          }
+        } catch (receiptErr) {
+          logger.debug('[LAUNCH] receipt probe failed: ' + receiptErr.message);
+        }
+
+        curveToToken.set(curveAddr.toLowerCase(), tokenAddr.toLowerCase());
+        curveToToken.set(tokenAddr.toLowerCase(), tokenAddr.toLowerCase());
+        db.logLaunch(curveAddr, tokenAddr, `${tokenName} (${tokenSymbol})`);
+
+        const display = (tokenName !== '???' && tokenSymbol !== '???')
+          ? `${tokenName} (${tokenSymbol})`
+          : `Token (${tokenAddr.slice(0,6)}...${tokenAddr.slice(-4)})`;
+
+        logger.info(`[NEW LAUNCH] ${display} | token: ${tokenAddr} | curve: ${curveAddr}`);
+
+        // Cache name/symbol immediately so /positions shows correct names
+        tokenInfoCache.set(tokenAddr.toLowerCase(), { name: tokenName, symbol: tokenSymbol });
+        tokenInfoCache.set(curveAddr.toLowerCase(), { name: tokenName, symbol: tokenSymbol });
+
+        // === IMMEDIATE rich Telegram alert ===
+        const explorerLink = `${EXPLORER}/address/${tokenAddr}`;
+        const alertMsg =
+          `🚀 <b>New Launch!</b>\n` +
+          `<b>${tokenName}</b> (<code>${tokenSymbol}</code>)\n` +
+          `🪙 Token: <a href="${explorerLink}">${tokenAddr.slice(0,10)}...${tokenAddr.slice(-6)}</a>\n` +
+          `📈 Curve: <code>${curveAddr.slice(0,10)}...${curveAddr.slice(-6)}</code>\n` +
+          `⏱️ Block: ${log.blockNumber}`;
+
+        sendTg(alertMsg, { parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => {});
+        sendBuyMenu(curveAddr, display, tokenAddr).catch(() => {});
+
+        recentLaunches.unshift({ addr: curveAddr, token: tokenAddr, symbol: display, time: Date.now() });
+        if (recentLaunches.length > 10) recentLaunches.pop();
+
+        // Auto snipe — real curve, 2s delay for chain to settle
+        setTimeout(() => snipe(curveAddr, display, tokenAddr), 2000);
+
+      } catch (logErr) {
+        logger.warn('[LAUNCH PARSE ERR] ' + logErr.message);
+        try {
+          const addr = ('0x' + log.topics[1].slice(-40)).toLowerCase();
+          recentLaunches.unshift({ addr, symbol: 'LAUNCH', time: Date.now() });
+          if (recentLaunches.length > 10) recentLaunches.pop();
+          sendTg(`🚀 New launch: <code>${addr}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+          setTimeout(() => snipe(addr, 'LAUNCH'), 2000);
         } catch {}
       }
     }
