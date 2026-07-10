@@ -1061,9 +1061,6 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
     });
 
     logger.info('Telegram alerts + BUTTONS ENABLED (fun.noxa.fi mode)');
-    await sendTg('🚀 Robinhood Sniper started - focused on fun.noxa.fi/robinhood');
-    await sendMainMenu(TG_CHAT, 'Menu ready. Use buttons below:');
-    await sendAlert('🚀 Robinhood Sniper started (live on fun.noxa.fi/robinhood)');
   } catch (e) {
     logger.warn('Telegram init failed:', e.message);
   }
