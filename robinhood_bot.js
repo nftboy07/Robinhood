@@ -137,7 +137,9 @@ const curveABI = [
   // FACTORY = bonding curve hub - pass token address, send ETH value for buy
   'function buy(address token) external payable',
   'function sell(address token, uint256 tokenAmount) external',
-  'function curves(address token) external view returns (uint256 virtualEth, uint256 tokenBalance, bool graduated)',
+  // curves() returns: (address creator, uint256 tokenBalance, uint256 virtualEth, uint256 id)
+  // Graduation = tokenBalance == 0n (all tokens sold from curve)
+  'function curves(address token) external view returns (address creator, uint256 tokenBalance, uint256 virtualEth, uint256 id)',
   'function createToken(string name, string symbol) external payable returns (address)',
   'function tokenCount() external view returns (uint256)',
   'event TokenCreated(address indexed token, address indexed creator, string name, string symbol, uint256)',
@@ -1767,7 +1769,7 @@ async function estimateBuyOutput(curveAddress, ethAmount) {
   try {
     const factory = new ethers.Contract(FACTORY, curveABI, provider);
     const state = await factory.curves(curveAddress);
-    if (!state || state.tokenBalance === 0n) return 0n;
+    if (!state || state.tokenBalance === 0n || state.virtualEth === 0n) return 0n;
     // Simple bonding curve estimate: tokens = (ethAmount / virtualEth) * tokenBalance
     const tokens = (ethAmount * state.tokenBalance) / (state.virtualEth + ethAmount);
     return tokens;
@@ -2409,14 +2411,23 @@ async function sellPosition(pos, exitType = 'MANUAL') {
   const posKey = pos.token || pos.curve;
   const sellAmt = pos.amount;
 
-  if (pos.isMigrated && ROUTER) {
+  // Graduated token: only attempt DEX sell if ROUTER and WETH are both configured
+  if (pos.isMigrated && ROUTER && WETH) {
     const exitPrice = await getLivePrice(posKey, posCurve);
     const txHash = await sellOnDex(posKey, sellAmt);
     if (txHash) {
       logTradeToHistory(pos, sellAmt, exitPrice, txHash, exitType);
       positions = positions.filter(p => (p.token || p.curve) !== posKey);
       savePositions();
+    } else {
+      logger.warn(`[HOLD] ${pos.symbol} graduated - DEX sell failed. Holding.`);
+      await sendTg(`⚠️ <b>${pos.symbol}</b> graduated but no DEX sell available. Holding - sell manually.`);
     }
+    return;
+  }
+  // If graduated but no ROUTER/WETH configured: skip - position stays, no SL loop
+  if (pos.isMigrated && (!ROUTER || !WETH)) {
+    logger.debug(`[GRADUATED HOLD] ${pos.symbol} - no DEX configured, skipping sell`);
     return;
   }
 
@@ -2434,8 +2445,9 @@ async function sellPosition(pos, exitType = 'MANUAL') {
     const key = pos.token || pos.curve; positions = positions.filter(p => (p.token || p.curve) !== key);
     savePositions();
   } catch (e) {
-    logger.error(`Sell error on curve: ${e.message}. Attempting DEX fallback...`);
-    if (ROUTER) {
+    logger.error(`Sell error on curve: ${e.message}`);
+    if (ROUTER && WETH) {
+      // Curve sell failed - attempt DEX fallback
       pos.isMigrated = true;
       const exitPrice = await getLivePrice(posKey, posCurve);
       const txHash = await sellOnDex(posKey, sellAmt);
@@ -2445,7 +2457,10 @@ async function sellPosition(pos, exitType = 'MANUAL') {
         savePositions();
       }
     } else {
-      await sendTg(`❌ Sell failed for ${pos.symbol}: ${e.message}`);
+      // No DEX - pause SL monitoring to prevent infinite retry loop
+      pos.slPaused = true;
+      savePositions();
+      await sendTg(`⚠️ Sell failed for <b>${pos.symbol}</b>: ${e.message.slice(0, 80)}\nSL paused - sell manually.`);
     }
   }
 }
@@ -2505,13 +2520,16 @@ async function monitorPositions() {
           continue;
         }
 
-        if (ROUTER && !pos.isMigrated) {
+        // Detect graduation: tokenBalance==0 means bonding curve is complete
+        // The 4th word in curves() is NOT a bool - graduation = zero token balance
+        if (!pos.isMigrated) {
           const factory = new ethers.Contract(FACTORY, curveABI, provider);
           const state = await factory.curves(pos.token).catch(() => null);
-          if (state && state.graduated) {
+          if (state && state.tokenBalance === 0n && state.virtualEth === 0n) {
             pos.isMigrated = true;
-            logger.info(`[MIGRATED] ${pos.symbol} graduated to DEX`);
-            sendTg(`🔄 ${pos.symbol} graduated to DEX - will use DEX sells`).catch(()=>{});
+            logger.info(`[GRADUATED] ${pos.symbol} bonding curve complete`);
+            sendTg(`🎓 <b>${pos.symbol}</b> bonding curve complete! Holding position.`).catch(()=>{});
+            savePositions();
           }
         }
 
@@ -2559,9 +2577,10 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
   }
 
   // 1. Hard Stop Loss - protect capital fast (sell everything, even moonbag on hard rugs)
-  if (pnlPct <= -STOP_LOSS * 100) {
+  // Skip if slPaused (graduated token with no DEX - avoid infinite retry loop)
+  if (pnlPct <= -STOP_LOSS * 100 && !pos.slPaused) {
     logger.info(`[SL] ${pos.symbol} PnL ${pnlPct.toFixed(1)}% - Selling for capital protection`);
-    await sendTg(`🛡️ SL hit on ${pos.symbol} (${pnlPct.toFixed(1)}%) - Protecting capital`);
+    await sendTg(`🛡️ SL hit on <b>${pos.symbol}</b> (${pnlPct.toFixed(1)}%) - Protecting capital`);
     await sellPosition(pos, 'STOP_LOSS');
     return;
   }
