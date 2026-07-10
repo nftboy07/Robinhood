@@ -67,7 +67,7 @@ class MempoolMonitor {
       // WebSocket connection error/close handlers
       if (this.provider.websocket) {
         this.provider.websocket.on('close', () => {
-          this.logger.warn('[MEMPOOL] WS Connection closed. Retrying in 15s...');
+          this.logger.debug('[MEMPOOL] WS Connection closed. Retrying in 15s...');
           this.cleanup();
           this.reconnectTimeout = setTimeout(() => this.start(), 15000);
         });

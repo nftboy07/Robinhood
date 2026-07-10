@@ -2045,13 +2045,13 @@ async function isHoneypotOrBad(curveAddress, tokenAddr = null) {
       }
     }
 
-    const curve = new ethers.Contract(curveAddress, curveABI, provider);
-    const testAmount = ethers.parseEther('0.001'); // smaller test for low balance wallets
+    const factory = new ethers.Contract(FACTORY, curveABI, provider);
+    const testAmount = ethers.parseEther('0.001');
 
-    // Simulate buy - handle insufficient funds in estimate (common in sim)
+    // Simulate buy - handle insufficient funds in estimate
     let buyGas;
     try {
-      buyGas = await curve.buy.estimateGas(1n, wallet.address, { value: testAmount });
+      buyGas = await factory.buy.estimateGas(actualToken, { value: testAmount });
     } catch (e) {
       if (e.message.includes('insufficient funds') || e.code === 'INSUFFICIENT_FUNDS') {
         const bal = await getBalance();
@@ -2069,7 +2069,7 @@ async function isHoneypotOrBad(curveAddress, tokenAddr = null) {
     }
 
     // Try to simulate sell (if we had tokens)
-    const sellGas = await curve.sell.estimateGas(1000n, 1n).catch(() => 999999n);
+    const sellGas = await factory.sell.estimateGas(actualToken, 1000n).catch(() => 999999n);
     if (sellGas > 1000000n) {
       logger.warn(`[HONEYPOT] High sell gas ${sellGas} for ${curveAddress}`);
       return true;
@@ -2323,10 +2323,10 @@ async function sellPosition(pos, exitType = 'MANUAL') {
     return;
   }
 
-  const curve = new ethers.Contract(posCurve, curveABI, wallet);
+  const curve = new ethers.Contract(FACTORY, curveABI, wallet);
   try {
     const exitPrice = await getLivePrice(posKey, posCurve);
-    const tx = await curve.sell(sellAmt, 0n, { gasLimit: 550000 });
+    const tx = await curve.sell(posKey, sellAmt, { gasLimit: 550000 });
     const receipt = await tx.wait();
     const txHash = receipt.hash || receipt.transactionHash;
     logger.info(`[SOLD] ${pos.symbol}`);
@@ -2403,14 +2403,19 @@ async function monitorPositions() {
   try {
     for (const pos of [...positions]) {
       try {
-        const price = await getCurrentPrice(pos.curve || pos.token);
+        const price = await getLivePrice(pos.token, pos.curve);
         if (!price || price === 0n) {
-          if (ROUTER && !pos.isMigrated) {
+          continue;
+        }
+
+        if (ROUTER && !pos.isMigrated) {
+          const factory = new ethers.Contract(FACTORY, curveABI, provider);
+          const state = await factory.curves(pos.token).catch(() => null);
+          if (state && state.graduated) {
             pos.isMigrated = true;
-            logger.info(`[MIGRATED] ${pos.symbol} switched to DEX mode`);
+            logger.info(`[MIGRATED] ${pos.symbol} graduated to DEX`);
             sendTg(`🔄 ${pos.symbol} graduated to DEX - will use DEX sells`).catch(()=>{});
           }
-          continue;
         }
 
         const entry = Number(pos.entryPrice);
@@ -2519,9 +2524,9 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
         await sendTg(`🔄 Re-buying dip on ${pos.symbol} (${dipFromEntry.toFixed(0)}% down)`);
         
         try {
-          const curve = new ethers.Contract(pos.token, curveABI, wallet);
-          const gasEst = await curve.buy.estimateGas(0n, wallet.address, { value: reAmount });
-          await curve.buy(0n, wallet.address, {
+          const curve = new ethers.Contract(FACTORY, curveABI, wallet);
+          const gasEst = await curve.buy.estimateGas(pos.token, { value: reAmount });
+          await curve.buy(pos.token, {
             value: reAmount,
             gasLimit: gasEst * 130n / 100n
           });
