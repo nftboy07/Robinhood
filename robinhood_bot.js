@@ -2140,7 +2140,12 @@ async function isHoneypotOrBad(curveAddress, tokenAddr = null) {
         }
       }
       logger.warn(`[HONEYPOT] Estimate failed for ${curveAddress}: ${e.message}`);
-      return true;
+      const msg = e.message.toLowerCase();
+      if (msg.includes('revert') || msg.includes('transfer') || msg.includes('overflow') || msg.includes('balance') || msg.includes('allowance') || msg.includes('zero')) {
+        return true;
+      }
+      logger.info(`[HONEYPOT] Non-contract estimate failure (network/node glitch) - allowing launch anyway`);
+      return false;
     }
     if (buyGas > 800000n) {
       logger.warn(`[HONEYPOT] High buy gas ${buyGas} for ${curveAddress}`);
@@ -2156,8 +2161,12 @@ async function isHoneypotOrBad(curveAddress, tokenAddr = null) {
 
     return false;
   } catch (e) {
-    logger.warn(`[HONEYPOT] Estimate failed for ${curveAddress}: ${e.message}`);
-    return true; // if can't even estimate, risky
+    logger.warn(`[HONEYPOT] General check failed for ${curveAddress}: ${e.message}`);
+    const msg = e.message.toLowerCase();
+    if (msg.includes('revert') || msg.includes('transfer') || msg.includes('overflow') || msg.includes('balance') || msg.includes('allowance') || msg.includes('zero')) {
+      return true;
+    }
+    return false;
   }
 }
 
