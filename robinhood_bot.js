@@ -101,7 +101,7 @@ const MAX_DAILY_LOSS_PCT = config.maxDailyLossPct ?? 25;
 const MAX_TRADES_PER_HOUR = config.maxTradesPerHour ?? 12;
 let SLIPPAGE_PCT = config.slippagePct ?? 15;
 const ENABLE_TG = config.enableTelegram !== false;
-const TIME_LIMIT_SECS = config.timeLimitSeconds ?? 600; // default 10 minutes auto-exit
+const TIME_LIMIT_SECS = config.timeLimitSeconds ?? 0; // default 0 (disabled) - only exit if positive seconds specified
 
 // Strategy config (safe small amount sniping) - LIVE MAINNET
 const STRATEGY = config.strategy || {
@@ -2755,16 +2755,18 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
   }
 
   // 0. Time-Based Stop-Loss (Auto-Exit after X seconds)
-  if (!pos.entryTime) {
-    pos.entryTime = Date.now();
-    savePositions();
-  }
-  const ageSecs = Math.floor((Date.now() - pos.entryTime) / 1000);
-  if (TIME_LIMIT_SECS > 0 && ageSecs >= TIME_LIMIT_SECS) {
-    logger.info(`[TIME EXIT] ${pos.symbol} reached time limit of ${TIME_LIMIT_SECS}s (${ageSecs}s) - executing auto-exit`);
-    await sendTg(`⏳ <b>Time limit reached</b> for ${pos.symbol} (${Math.floor(ageSecs/60)}m) - executing auto-exit`);
-    await sellPosition(pos, 'TIME_LIMIT');
-    return;
+  if (TIME_LIMIT_SECS > 0) {
+    if (!pos.entryTime) {
+      pos.entryTime = Date.now();
+      savePositions();
+    }
+    const ageSecs = Math.floor((Date.now() - pos.entryTime) / 1000);
+    if (ageSecs >= TIME_LIMIT_SECS) {
+      logger.info(`[TIME EXIT] ${pos.symbol} reached time limit of ${TIME_LIMIT_SECS}s (${ageSecs}s) - executing auto-exit`);
+      await sendTg(`⏳ <b>Time limit reached</b> for ${pos.symbol} (${Math.floor(ageSecs/60)}m) - executing auto-exit`);
+      await sellPosition(pos, 'TIME_LIMIT');
+      return;
+    }
   }
 
   // Graduated tokens: no automated selling until DEX pool exists.
