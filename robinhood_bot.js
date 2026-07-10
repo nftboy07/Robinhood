@@ -111,8 +111,11 @@ let SNIPE_AMOUNT = ethers.parseEther( String(config.snipeAmountEth || '0.0001') 
 // Custom chain 4663 - static network to avoid ENS lookups and errors
 // Support backup RPCs (add to config.json "rpcs": ["primary", "backup..."]) for reliability
 const network = new ethers.Network('robinhood', 4663);
-const providerList = RPCS.map(rpc => new ethers.JsonRpcProvider(rpc, network, { staticNetwork: network }));
-const provider = new ethers.FallbackProvider(providerList, 1);  // use first healthy provider
+const provider = new ethers.JsonRpcProvider(
+  RPCS[0] || 'https://rpc.mainnet.chain.robinhood.com',
+  network,
+  { staticNetwork: network }
+);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 // ====================== LOGGING ======================
