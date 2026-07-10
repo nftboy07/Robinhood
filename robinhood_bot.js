@@ -128,12 +128,19 @@ const logger = winston.createLogger({
   transports: [new winston.transports.Console(), new winston.transports.File({ filename: 'bot.log' })]
 });
 
-// ====================== ABIs (NOXA / Pump.fun style) ======================
+// ====================== ABIs (NOXA fun.noxa.fi / Robinhood Chain) ======================
+// Verified 2026-07-10: The FACTORY is the bonding curve contract.
+// buy(address token) payable   - selector 0xf088d547
+// sell(address token, uint256) - selector 0x6c197ff5
+// curves(address token)        - selector 0x2cc3dc6e (returns curve state)
 const curveABI = [
-  'function buy(uint256 amountOutMin, address recipient) external payable',
-  'function sell(uint256 tokenAmount, uint256 ethOutMin) external',
-  'function getPrice() external view returns (uint256)',
-  'function totalSupply() external view returns (uint256)',
+  // FACTORY = bonding curve hub - pass token address, send ETH value for buy
+  'function buy(address token) external payable',
+  'function sell(address token, uint256 tokenAmount) external',
+  'function curves(address token) external view returns (uint256 virtualEth, uint256 tokenBalance, bool graduated)',
+  'function createToken(string name, string symbol) external payable returns (address)',
+  'function tokenCount() external view returns (uint256)',
+  'event TokenCreated(address indexed token, address indexed creator, string name, string symbol, uint256)',
   'event CurveCompleted(address indexed token, uint256 ethRaised, uint256 lpTokens)',
   'event Trade(address indexed trader, bool isBuy, uint256 ethAmount, uint256 tokenAmount)'
 ];
@@ -476,7 +483,7 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
           const price = await getCurrentPrice(addr);
           const bal = await getTokenBalance(addr, wallet.address);
           const info = await getTokenInfo(addr);
-          const hasBuy = await (new ethers.Contract(addr, curveABI, provider)).buy.estimateGas(0n, wallet.address, {value: ethers.parseEther('0.0001')}).then(() => 'yes').catch(() => 'no/err');
+          const hasBuy = await (new ethers.Contract(FACTORY, curveABI, provider)).buy.estimateGas(addr, {value: ethers.parseEther('0.0001')}).then(() => 'yes').catch(() => 'no/err');
           await telegramBot.sendMessage(msg.chat.id, `🔍 Check ${addr}:\nName: ${info.name} (${info.symbol})\nPrice: ${ethers.formatEther(price)}\nYour bal: ${ethers.formatEther(bal)}\nHas buy fn?: ${hasBuy}\n<a href="${EXPLORER}/address/${addr}">Explorer</a>`);
         } else {
           await sendTg('Usage: /check <addr>');
@@ -1224,7 +1231,7 @@ async function forceBuy(curveAddress, amountStr) {
   const buyAmount = ethers.parseEther(amountStr);
   logger.info(`[FORCE BUY] ${curveAddress} for ${amountStr} ETH (bypassing checks)`);
 
-  const curve = new ethers.Contract(curveAddress, curveABI, wallet);
+  const curve = new ethers.Contract(FACTORY, curveABI, wallet);
   try {
     const feeData = await provider.getFeeData();
     const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
@@ -1235,12 +1242,12 @@ async function forceBuy(curveAddress, amountStr) {
     let minOut = 0n;
     let gasEst = 300000n;
     try {
-      gasEst = await curve.buy.estimateGas(minOut, wallet.address, { value: buyAmount });
+      gasEst = await curve.buy.estimateGas(curveAddress, { value: buyAmount });
     } catch (e) {
       gasEst = 300000n;
     }
 
-    const tx = await curve.buy(minOut, wallet.address, {
+    const tx = await curve.buy(curveAddress, {
       value: buyAmount,
       gasLimit: gasEst * 150n / 100n,
       maxFeePerGas: maxFee,
@@ -1673,8 +1680,15 @@ function withTimeout(promise, ms, label = 'op') {
 
 async function getCurrentPrice(tokenAddr) {
   try {
-    const curve = new ethers.Contract(tokenAddr, curveABI, provider);
-    return await curve.getPrice();
+    // Factory IS the bonding curve - call curves(token) on FACTORY
+    const factory = new ethers.Contract(FACTORY, curveABI, provider);
+    const state = await factory.curves(tokenAddr);
+    // state = [virtualEth, tokenBalance, graduated]
+    // Price = virtualEth / tokenBalance (ETH per token)
+    if (state && state.tokenBalance > 0n) {
+      return (state.virtualEth * (10n ** 18n)) / state.tokenBalance;
+    }
+    return 0n;
   } catch { return 0n; }
 }
 
@@ -1751,16 +1765,13 @@ async function getReceivedAmountFromReceipt(receipt, owner) {
 // Estimate tokens you would receive for a buy (uses static call simulation)
 async function estimateBuyOutput(curveAddress, ethAmount) {
   try {
-    const curve = new ethers.Contract(curveAddress, curveABI, provider);
-    // Many bonding curves expose this via simulation of buy
-    const estimatedTokens = await curve.callStatic.buy(0, wallet.address, { value: ethAmount });
-    return estimatedTokens;
-  } catch (e) {
-    // Fallback: rough price * amount
-    const price = await getCurrentPrice(curveAddress);
-    if (price > 0) return (ethAmount * BigInt(10**18)) / price;
-    return 0n;
-  }
+    const factory = new ethers.Contract(FACTORY, curveABI, provider);
+    const state = await factory.curves(curveAddress);
+    if (!state || state.tokenBalance === 0n) return 0n;
+    // Simple bonding curve estimate: tokens = (ethAmount / virtualEth) * tokenBalance
+    const tokens = (ethAmount * state.tokenBalance) / (state.virtualEth + ethAmount);
+    return tokens;
+  } catch { return 0n; }
 }
 
 // Render dashboard inside Telegram
@@ -2285,7 +2296,8 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
   const estimated = await estimateBuyOutput(curveAddress, SNIPE_AMOUNT);
   logger.info(`Estimated tokens for buy: ${ethers.formatEther(estimated || 0n)}`);
 
-  const curve = new ethers.Contract(curveAddress, curveABI, wallet);
+  // curveAddress IS the token address; buy/sell on FACTORY
+  const curve = new ethers.Contract(FACTORY, curveABI, wallet);
 
   // Verify curve has code (topics[2] was creator wallet, not curve)
   const curveCode = await directProvider.getCode(curveAddress).catch(() => '0x');
