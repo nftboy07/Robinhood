@@ -2793,8 +2793,6 @@ async function main() {
       if (balEth < 0.01) {
         sendAlert(`⚠️ Low balance: ${balEth.toFixed(4)} ETH`).catch(() => {});
       }
-      // Fire and forget to avoid blocking the interval if TG is slow
-      sendTg(`❤️ Heartbeat | Pos: ${positions.length} | Bal: ${balEth.toFixed(4)} ETH`).catch(() => {});
       savePositions();
     } catch (hbErr) {
       logger.debug('heartbeat error: ' + (hbErr.message || hbErr));
