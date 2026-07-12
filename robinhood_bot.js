@@ -1278,7 +1278,7 @@ async function buyToken(curveAddress, amountStr) {
 
       logger.info(`[BOUGHT] tx: ${txHash}`);
       await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
-      await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
+      await sendTg(`✅ Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a> | <a href="https://bullscan.fun/robinhood/token/${actualToken}">Bullscan</a>`);
     }
 
     // Check if already have position
@@ -1379,7 +1379,7 @@ async function forceBuy(curveAddress, amountStr) {
 
       logger.info(`[FORCE BOUGHT] tx: ${txHash}`);
       await sendAlert(`✅ Force Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
-      await sendTg(`✅ Force Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a>`);
+      await sendTg(`✅ Force Bought ${amountStr} ETH worth\nTx: <code>${txHash}</code>\n<a href="${txLink}">View on Blockscout</a> | <a href="https://bullscan.fun/robinhood/token/${actualToken}">Bullscan</a>`);
     }
 
     const existing = positions.find(p => (p.curve || p.token) === curveAddress || p.token === curveAddress);
@@ -1647,7 +1647,7 @@ async function handlePositions(chatId) {
 
     return {
       text: `${i+1}. <b>${sym}</b>${migStr}\n` +
-            `   <a href="${explorerLink}">${posTok.slice(0,10)}...${posTok.slice(-6)}</a>\n` +
+            `   <a href="${explorerLink}">${posTok.slice(0,10)}...${posTok.slice(-6)}</a> | <a href="https://bullscan.fun/robinhood/token/${posTok}">Bullscan</a>\n` +
             `   Bal: <b>${balStr}</b> | Price: ${priceStr}\n` +
             `   Value: <b>${valueStr}</b>${pnlStr}\n` +
             `   Entry: ${entryStr} | Re-entries: ${p.reEntries || 0}\n`,
@@ -2558,7 +2558,7 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
       }
       
       const txLink = `${EXPLORER}/tx/${txHash}`;
-      await sendTg(`✅ Bought <b>${sym}</b> on fun.noxa.fi/robinhood\nEst. amount: ${ethers.formatEther(amount)}\n<a href="${txLink}">View tx</a>`);
+      await sendTg(`✅ Bought <b>${sym}</b> on fun.noxa.fi/robinhood\nEst. amount: ${ethers.formatEther(amount)}\n<a href="${txLink}">View tx</a> | <a href="https://bullscan.fun/robinhood/token/${actualToken}">Bullscan</a>`);
       await sendAlert(`✅ Snipe bought ${symbol}\n${txLink}`);
     }
 
@@ -3020,7 +3020,7 @@ async function pollNewLaunches() {
         const alertMsg =
           `🚀 <b>New Launch!</b>\n` +
           `<b>${tokenName}</b> (<code>${tokenSymbol}</code>)\n` +
-          `🪙 Token: <a href="${explorerLink}">${tokenAddr.slice(0,10)}...${tokenAddr.slice(-6)}</a>\n` +
+          `🪙 Token: <a href="${explorerLink}">${tokenAddr.slice(0,10)}...${tokenAddr.slice(-6)}</a> | <a href="https://bullscan.fun/robinhood/token/${tokenAddr}">Bullscan</a>\n` +
           `📈 Curve: <code>${curveAddr.slice(0,10)}...${curveAddr.slice(-6)}</code>\n` +
           `⏱️ Block: ${log.blockNumber}`;
 
