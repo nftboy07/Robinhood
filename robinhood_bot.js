@@ -62,6 +62,18 @@ const RPCS = (config.rpcs && Array.isArray(config.rpcs) && config.rpcs.length > 
 const PRIVATE_KEY = process.env.PK || '';
 const TG_TOKEN = process.env.TELEGRAM_TOKEN || process.env.BOT_TOKEN || process.env.TG_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '';
 const TG_CHAT = process.env.ADMIN_CHAT_ID || process.env.TELEGRAM_CHAT_ID || process.env.TG_CHAT_ID || process.env.TELEGRAM_CHAT_ID || '';
+const BLOCKSCOUT_API_KEY = process.env.BLOCKSCOUT_API_KEY || '';
+
+function getBlockscoutApiOptions(urlStr) {
+  const headers = {};
+  let finalUrl = urlStr;
+  if (BLOCKSCOUT_API_KEY) {
+    // Rewrite host to multichain API host
+    finalUrl = urlStr.replace('https://robinhoodchain.blockscout.com/api/v2', 'https://api.blockscout.com/4663/api/v2');
+    headers['x-api-key'] = BLOCKSCOUT_API_KEY;
+  }
+  return { url: finalUrl, options: { headers } };
+}
 
 if (!PRIVATE_KEY || PRIVATE_KEY.includes('YOUR')) {
   console.error('Set PK in .env (use a dedicated small-balance wallet only)');
@@ -1420,7 +1432,8 @@ async function getTokenInfo(addr) {
   let symbol = "???";
   // Try Blockscout API
   try {
-    const res = await withTimeout(fetch(`https://robinhoodchain.blockscout.com/api/v2/tokens/${addr}`), 4000, 'getTokenInfo fetch').catch(() => null);
+    const { url, options } = getBlockscoutApiOptions(`https://robinhoodchain.blockscout.com/api/v2/tokens/${addr}`);
+    const res = await withTimeout(fetch(url, options), 4000, 'getTokenInfo fetch').catch(() => null);
     if (res && res.ok) {
       const data = await res.json();
       const tokenInfo = data.token || data;
@@ -1529,10 +1542,16 @@ async function importTokensFromBlockscout(chatId) {
     await sendTg('⏳ Checking Blockscout for on-chain token balances to import...');
     
     const url = `https://robinhoodchain.blockscout.com/api/v2/addresses/${wallet.address}/token-balances`;
-    
+    const { url: finalUrl, options } = getBlockscoutApiOptions(url);
     const https = require('https');
+    const urlObj = new URL(finalUrl);
+    const requestOptions = {
+      hostname: urlObj.hostname,
+      path: urlObj.pathname + urlObj.search,
+      headers: options.headers || {}
+    };
     const rawData = await new Promise((resolve, reject) => {
-      https.get(url, (res) => {
+      https.get(requestOptions, (res) => {
         let body = '';
         res.on('data', (chunk) => body += chunk);
         res.on('end', () => resolve(body));
@@ -2004,7 +2023,8 @@ async function handleDashboardEdit(chatId, messageId) {
 // Scan creator history for rug trends
 async function checkCreatorHistory(tokenAddress) {
   try {
-    const tokenRes = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${tokenAddress}`);
+    const { url: url1, options: opt1 } = getBlockscoutApiOptions(`https://robinhoodchain.blockscout.com/api/v2/addresses/${tokenAddress}`);
+    const tokenRes = await fetch(url1, opt1);
     if (!tokenRes.ok) return false;
     const tokenData = await tokenRes.json();
     const creator = tokenData.creator_address_hash || tokenData.creatorAddressHash || (tokenData.creator && tokenData.creator.hash);
@@ -2012,7 +2032,8 @@ async function checkCreatorHistory(tokenAddress) {
 
     logger.info(`[CREATOR SCAN] Token ${tokenAddress} creator: ${creator}`);
 
-    const creatorRes = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${creator}/tokens?type=erc-20`);
+    const { url: url2, options: opt2 } = getBlockscoutApiOptions(`https://robinhoodchain.blockscout.com/api/v2/addresses/${creator}/tokens?type=erc-20`);
+    const creatorRes = await fetch(url2, opt2);
     if (!creatorRes.ok) return false;
     const creatorData = await creatorRes.json();
     if (creatorData && creatorData.items && Array.isArray(creatorData.items)) {
@@ -2206,7 +2227,8 @@ async function checkBytecodeSimilarity(tokenAddress) {
 // Check holder distribution on Blockscout to screen rugs/whales (top 10 sum > 35% or top 1 > 50%)
 async function checkHolderDistribution(tokenAddress, curveAddress) {
   try {
-    const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/tokens/${tokenAddress}/holders`);
+    const { url, options } = getBlockscoutApiOptions(`https://robinhoodchain.blockscout.com/api/v2/tokens/${tokenAddress}/holders`);
+    const res = await fetch(url, options);
     if (!res.ok) {
       logger.debug(`[HOLDERS] Blockscout request failed for ${tokenAddress}: ${res.statusText}`);
       return false; // don't block snipe if API is down
