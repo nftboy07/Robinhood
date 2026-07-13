@@ -87,7 +87,8 @@ const ROUTER = config.router || '';
 // Known launch related contracts for better detection (update as discovered)
 const KNOWN_LAUNCH_CONTRACTS = [
   '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f', // pair factory candidate
-  '0xCaf681a66D020601342297493863E78C959E5cb2'  // high activity
+  '0xCaf681a66D020601342297493863E78C959E5cb2', // high activity
+  '0x694b6c5299a0416e0997c62de5503a00a82a48f3'  // ZeroHood / hood.fun Factory
 ];
 const STOP_LOSS = config.stopLossPct ?? 0.15;
 const TAKE_PROFIT = config.takeProfitPct ?? 0.60;
@@ -1220,6 +1221,15 @@ async function sendBuyMenu(tokenAddr, fallbackSymbol = "NEW", nameAddr = null) {
 async function buyToken(curveAddress, amountStr) {
   const buyAmount = ethers.parseEther(amountStr);
   logger.info(`[MANUAL BUY] ${curveAddress} for ${amountStr} ETH`);
+
+  // Safeguard: Check if it's a NOXA Fun bonding curve
+  const factoryContract = new ethers.Contract(FACTORY, curveABI, provider);
+  const state = await factoryContract.curves(curveAddress).catch(() => null);
+  const isNoxa = state && state.creator && state.creator !== '0x0000000000000000000000000000000000000000';
+  if (!isNoxa) {
+    await sendTg(`⚠️ <b>${curveAddress}</b> is not a NOXA Fun bonding curve.\nUniswap v4 swaps (ZeroHood / hood.fun) are not supported via EOA keys directly.\n\nPlease trade this token on <a href="https://bullscan.fun/robinhood/token/${curveAddress}">Bullscan</a> or hood.fun!`, { parse_mode: 'HTML', disable_web_page_preview: true });
+    return;
+  }
 
   try {
     let txHash, blockNumber, amount, entryPrice, actualToken;
@@ -2948,6 +2958,7 @@ async function pollNewLaunches() {
     const fromBlock = Math.max(lastPolledBlock + 1, current - MAX_SCAN_BLOCKS);
 
     const topic = config.eventTopic || ethers.id('TokenCreated(address,address,string,string,uint256)');
+    const hoodFunTopic = '0xaab7db13ef23b7916e432d22cf716aebaff1644c405a4632fac716da46e9520e'; // Launched(address,uint256,address,bytes32,string,string,string,string,string,string,string,string,uint256)
     const curveCompleteTopic = ethers.id('CurveCompleted(address,uint256,uint256)');
 
     // New launches - force broad scan if factory is placeholder
@@ -2968,14 +2979,15 @@ async function pollNewLaunches() {
     }
 
     // Fallback: also scan known launch contracts for activity
-    if ((!logs || logs.length === 0) && KNOWN_LAUNCH_CONTRACTS.length > 0) {
+    if (KNOWN_LAUNCH_CONTRACTS.length > 0) {
       for (const known of KNOWN_LAUNCH_CONTRACTS) {
         try {
+          const targetTopic = (known.toLowerCase() === '0x694b6c5299a0416e0997c62de5503a00a82a48f3') ? hoodFunTopic : topic;
           const extra = await withRetry(() => directProvider.getLogs({
             address: known,
             fromBlock,
             toBlock: current,
-            topics: [topic]
+            topics: [targetTopic]
           }), 2, 10000).catch(() => []);
           if (extra && extra.length) logs = logs.concat(extra);
         } catch {}
@@ -2988,12 +3000,7 @@ async function pollNewLaunches() {
     for (const log of logs) {
       if (isPaused) break;
       try {
-        // === CORRECT EVENT STRUCTURE (verified on-chain 2026-07-10) ===
-        // topics[1] = token address (ERC20)
-        // topics[2] = creator wallet (NOT curve!) -- ignore
-        // data      = ABI-encoded (string name, string symbol, uint256)
-        // Real curve = non-factory contract with code in same tx receipt
-
+        const isHoodFun = log.topics[0].toLowerCase() === hoodFunTopic.toLowerCase();
         const tokenAddr = ('0x' + log.topics[1].slice(-40)).toLowerCase();
 
         // Deduplicate across overlapping scan windows
@@ -3002,37 +3009,59 @@ async function pollNewLaunches() {
         // Keep set from growing unbounded
         if (global.seenLaunchTokens.size > 200) global.seenLaunchTokens.clear();
 
-        // Decode name + symbol from event data (ABI-encoded strings in data)
+        // Decode name + symbol from event data
         let tokenName = '???';
         let tokenSymbol = '???';
-        try {
-          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-            ['string', 'string', 'uint256'],
-            log.data
-          );
-          tokenName = decoded[0] || '???';
-          tokenSymbol = decoded[1] || '???';
-        } catch {}
+        
+        if (isHoodFun) {
+          try {
+            // Launched(address indexed token, uint256 indexed tokenId, address indexed creator, bytes32 claimKey, string name, string symbol, string description, ...)
+            const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+              ['bytes32', 'string', 'string', 'string', 'string', 'string', 'string', 'string', 'uint256'],
+              log.data
+            );
+            tokenName = decoded[1] || '???';
+            tokenSymbol = decoded[2] || '???';
+          } catch (e) {
+            logger.debug('[LAUNCH] hood.fun decode failed: ' + e.message);
+          }
+        } else {
+          try {
+            const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+              ['string', 'string', 'uint256'],
+              log.data
+            );
+            tokenName = decoded[0] || '???';
+            tokenSymbol = decoded[1] || '???';
+          } catch {}
+        }
 
         // Find real curve contract from receipt (non-factory addr with code in same tx)
         let curveAddr = tokenAddr;
-        try {
-          const receipt = await directProvider.getTransactionReceipt(log.transactionHash);
-          if (receipt) {
-            const seen = new Set([FACTORY.toLowerCase(), tokenAddr]);
-            for (const rlog of receipt.logs) {
-              const a = rlog.address.toLowerCase();
-              if (seen.has(a)) continue;
-              seen.add(a);
-              const code = await directProvider.getCode(a).catch(() => '0x');
-              if (code && code.length > 2) {
-                curveAddr = a;
-                break;
+        if (isHoodFun) {
+          // ZeroHood / hood.fun uses standard Uniswap v4 pools from the start.
+          // There is no bonding curve contract to buy/sell; tokenAddr is the target address.
+          curveAddr = tokenAddr;
+        } else {
+          // Find real curve contract from receipt (non-factory addr with code in same tx)
+          try {
+            const receipt = await directProvider.getTransactionReceipt(log.transactionHash);
+            if (receipt) {
+              const seen = new Set([FACTORY.toLowerCase(), tokenAddr]);
+              for (const rlog of receipt.logs) {
+                const a = rlog.address.toLowerCase();
+                if (seen.has(a)) continue;
+                seen.add(a);
+                const code = await directProvider.getCode(a).catch(() => '0x');
+                if (code && code.length > 2) {
+                  curveAddr = a;
+                  break;
+                }
               }
             }
+          } catch (receiptErr) {
+            logger.debug('[LAUNCH] receipt probe failed: ' + receiptErr.message);
           }
-        } catch (receiptErr) {
-          logger.debug('[LAUNCH] receipt probe failed: ' + receiptErr.message);
         }
 
         curveToToken.set(curveAddr.toLowerCase(), tokenAddr.toLowerCase());
@@ -3051,21 +3080,27 @@ async function pollNewLaunches() {
 
         // === IMMEDIATE rich Telegram alert ===
         const explorerLink = `${EXPLORER}/address/${tokenAddr}`;
+        const sourceLabel = isHoodFun ? 'hood.fun (ZeroHood)' : 'fun.noxa.fi';
         const alertMsg =
           `🚀 <b>New Launch!</b>\n` +
           `<b>${tokenName}</b> (<code>${tokenSymbol}</code>)\n` +
           `🪙 Token: <a href="${explorerLink}">${tokenAddr.slice(0,10)}...${tokenAddr.slice(-6)}</a> | <a href="https://bullscan.fun/robinhood/token/${tokenAddr}">Bullscan</a>\n` +
-          `📈 Curve: <code>${curveAddr.slice(0,10)}...${curveAddr.slice(-6)}</code>\n` +
+          `📈 Source: <b>${sourceLabel}</b>\n` +
           `⏱️ Block: ${log.blockNumber}`;
 
         sendTg(alertMsg, { parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => {});
-        sendBuyMenu(curveAddr, display, tokenAddr).catch(() => {});
-
-        recentLaunches.unshift({ addr: curveAddr, token: tokenAddr, symbol: display, time: Date.now() });
-        if (recentLaunches.length > 10) recentLaunches.pop();
-
-        // Auto snipe — real curve, 2s delay for chain to settle
-        setTimeout(() => snipe(curveAddr, display, tokenAddr), 2000);
+        
+        if (!isHoodFun) {
+          sendBuyMenu(curveAddr, display, tokenAddr).catch(() => {});
+          recentLaunches.unshift({ addr: curveAddr, token: tokenAddr, symbol: display, time: Date.now() });
+          if (recentLaunches.length > 10) recentLaunches.pop();
+          // Auto snipe NOXA Fun launches (graduating bonding curves)
+          setTimeout(() => snipe(curveAddr, display, tokenAddr), 2000);
+        } else {
+          // ZeroHood / hood.fun launches: log to db for history lookup, but skip auto-snipe since direct EOA buying on v4 pools is not supported
+          recentLaunches.unshift({ addr: curveAddr, token: tokenAddr, symbol: `${display} (v4)`, time: Date.now() });
+          if (recentLaunches.length > 10) recentLaunches.pop();
+        }
 
       } catch (logErr) {
         logger.warn('[LAUNCH PARSE ERR] ' + logErr.message);
@@ -3074,7 +3109,6 @@ async function pollNewLaunches() {
           recentLaunches.unshift({ addr, symbol: 'LAUNCH', time: Date.now() });
           if (recentLaunches.length > 10) recentLaunches.pop();
           sendTg(`🚀 New launch: <code>${addr}</code>`, { parse_mode: 'HTML' }).catch(() => {});
-          setTimeout(() => snipe(addr, 'LAUNCH'), 2000);
         } catch {}
       }
     }
