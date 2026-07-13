@@ -2210,9 +2210,21 @@ async function checkBytecodeSimilarity(tokenAddress) {
       logger.debug(`[SECURITY] Bytecode empty for ${tokenAddress} - could not verify`);
       return true; // allow if code not retrieved (mempool case / block delay)
     }
-    const STANDARD_LENGTH = 3324;
-    const STANDARD_PREFIX = '0x608060405234801561000f575f5ffd5b506004361061009b575f3560e01c806370a082311161006357806370a082311461';
-    if (code.length !== STANDARD_LENGTH || !code.startsWith(STANDARD_PREFIX)) {
+    
+    // Supported standard templates
+    const templates = [
+      {
+        length: 3324,
+        prefix: '0x608060405234801561000f575f5ffd5b506004361061009b575f3560e01c806370a082311161006357806370a082311461'
+      },
+      {
+        length: 9488,
+        prefix: '0x608080604052600436101561001c575b50361561001a575f80fd5b005b5f3560e01c90816302d05d3f14610a3557'
+      }
+    ];
+
+    const matches = templates.some(t => code.length === t.length && code.startsWith(t.prefix));
+    if (!matches) {
       logger.warn(`[SECURITY] Non-standard bytecode for ${tokenAddress} (len: ${code.length}) - potential backdoor/custom contract`);
       return false;
     }
