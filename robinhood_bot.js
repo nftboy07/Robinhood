@@ -1230,7 +1230,25 @@ async function buyToken(curveAddress, amountStr) {
   const state = await factoryContract.curves(curveAddress).catch(() => null);
   const isNoxa = state && state.creator && state.creator !== '0x0000000000000000000000000000000000000000';
   if (!isNoxa) {
-    await sendTg(`⚠️ <b>${curveAddress}</b> is not a NOXA Fun bonding curve.\nUniswap v4 swaps (ZeroHood / o1.exchange) are not supported via EOA keys directly.\n\nPlease trade this token on <a href="https://bullscan.fun/robinhood/token/${curveAddress}">Bullscan</a>, hood.fun, or o1.exchange!`, { parse_mode: 'HTML', disable_web_page_preview: true });
+    const poolKey = await resolveV4PoolKey(curveAddress);
+    if (poolKey) {
+      let display = 'Token';
+      try {
+        const tokenContract = new ethers.Contract(curveAddress, [
+          'function name() view returns (string)',
+          'function symbol() view returns (string)'
+        ], directProvider);
+        const [n, s] = await Promise.all([
+          tokenContract.name().catch(() => 'Token'),
+          tokenContract.symbol().catch(() => 'Token')
+        ]);
+        display = `${n} (${s})`;
+      } catch {}
+      await sendTg(`ℹ️ <b>${display}</b> is a Uniswap V4 pool.\nExecuting manual V4 buy...`, { parse_mode: 'HTML' });
+      await snipeV4(curveAddress, display, poolKey, amountStr);
+      return;
+    }
+    await sendTg(`⚠️ <b>${curveAddress}</b> is not a NOXA Fun bonding curve, and no Uniswap V4 pool was found.`, { parse_mode: 'HTML' });
     return;
   }
 
@@ -2689,7 +2707,7 @@ function getV4PoolKeyFromReceipt(receipt, tokenAddr) {
   return null;
 }
 
-async function snipeV4(tokenAddr, display, poolKey) {
+async function snipeV4(tokenAddr, display, poolKey, overrideAmountStr = null) {
   if (isPaused) {
     logger.info(`[PAUSED] Skipping V4 snipe for ${display}`);
     return;
@@ -2697,8 +2715,12 @@ async function snipeV4(tokenAddr, display, poolKey) {
   if (positions.length >= MAX_POS) return;
   if (!checkRiskLimits()) return;
 
+  const buyAmount = overrideAmountStr 
+    ? ethers.parseEther(overrideAmountStr)
+    : SNIPE_AMOUNT;
+
   const bal = await getBalance();
-  if (bal < SNIPE_AMOUNT * 2n) {
+  if (bal < buyAmount * 2n) {
     logger.warn(`[SKIP SNIPE V4] Low balance ${ethers.formatEther(bal)} ETH`);
     await sendTg(`⚠️ Low balance ${ethers.formatEther(bal)} ETH - skipping V4 snipe`);
     return;
@@ -2706,13 +2728,13 @@ async function snipeV4(tokenAddr, display, poolKey) {
 
   if (globalThis.paperTrading) {
     logger.info(`[PAPER SNIPE V4] ${display} | token: ${tokenAddr}`);
-    await sendTg(`🧪 <b>[PAPER TRADE] [AUTO-SNIPE V4]</b> Deployed paper trade for <b>${display}</b> on Uniswap V4 pool for ${ethers.formatEther(SNIPE_AMOUNT)} ETH.`);
+    await sendTg(`🧪 <b>[PAPER TRADE] [AUTO-SNIPE V4]</b> Deployed paper trade for <b>${display}</b> on Uniswap V4 pool for ${ethers.formatEther(buyAmount)} ETH.`);
     
     positions.push({
       curve: tokenAddr.toLowerCase(),
       token: tokenAddr.toLowerCase(),
       symbol: display,
-      amount: SNIPE_AMOUNT * (10n**18n) / 1000000n, // dummy amount
+      amount: buyAmount * (10n**18n) / 1000000n, // dummy amount
       entryPrice: 0n,
       highestPrice: 0n,
       isMigrated: true,
@@ -2728,13 +2750,13 @@ async function snipeV4(tokenAddr, display, poolKey) {
     return;
   }
 
-  logger.info(`[AUTO SNIPE V4] ${display} | token: ${tokenAddr} | poolId: ${poolKey.poolId} | Size: ${ethers.formatEther(SNIPE_AMOUNT)} ETH`);
+  logger.info(`[AUTO SNIPE V4] ${display} | token: ${tokenAddr} | poolId: ${poolKey.poolId} | Size: ${ethers.formatEther(buyAmount)} ETH`);
   
   try {
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
     const sw = buildV4Swap({
       zeroForOne: true,
-      amountIn: SNIPE_AMOUNT,
+      amountIn: buyAmount,
       amountOutMin: 1n, // 1 wei minimum
       deadline,
       key: poolKey
@@ -2762,7 +2784,7 @@ async function snipeV4(tokenAddr, display, poolKey) {
     });
 
     logger.info(`[V4 SWAP SUBMITTED] Hash: ${tx.hash}`);
-    await sendTg(`🚀 <b>[AUTO-SNIPE V4]</b> Submitted buy swap for <b>${display}</b> on Uniswap V4 pool:\nTx: <a href="${EXPLORER}/tx/${tx.hash}">${tx.hash.slice(0, 10)}...${tx.hash.slice(-6)}</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
+    await sendTg(`🚀 <b>[V4 SWAP]</b> Submitted buy swap for <b>${display}</b> on Uniswap V4 pool:\nTx: <a href="${EXPLORER}/tx/${tx.hash}">${tx.hash.slice(0, 10)}...${tx.hash.slice(-6)}</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
 
     const receipt = await tx.wait();
     logger.info(`[V4 SWAP MINED] Status: ${receipt.status} | Block: ${receipt.blockNumber}`);
@@ -2796,11 +2818,190 @@ async function snipeV4(tokenAddr, display, poolKey) {
     });
     savePositions();
 
-    await sendTg(`✅ <b>[AUTO-SNIPE V4 MINED]</b> Successfully bought <b>${display}</b> at block ${receipt.blockNumber}!\n⚠️ <i>Sells are not automated for V4 pools; please sell manually on Bullscan or o1.exchange.</i>`, { parse_mode: 'HTML' });
+    await sendTg(`✅ <b>[V4 SWAP MINED]</b> Successfully bought <b>${display}</b> at block ${receipt.blockNumber}!\n⚠️ <i>You can manage this position and sell manually using the /p menu.</i>`, { parse_mode: 'HTML' });
 
   } catch (err) {
     logger.error(`[V4 SNIPE ERROR] failed: ${err.message}`);
     await sendTg(`❌ <b>[V4 SNIPE FAILED]</b> for <b>${display}</b>:\nError: <code>${err.message}</code>`);
+  }
+}
+
+async function resolveV4PoolKey(tokenAddr) {
+  const initTopic = '0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438';
+  const poolManager = '0x8366a39CC670B4001A1121B8F6A443A643e40951';
+  
+  try {
+    const current = await directProvider.getBlockNumber();
+    const fromBlock = Math.max(0, current - 400000); // scan last ~400k blocks (fast)
+    
+    const logs = await directProvider.getLogs({
+      address: poolManager,
+      fromBlock,
+      toBlock: current,
+      topics: [
+        initTopic,
+        null,
+        null,
+        ethers.zeroPadValue(tokenAddr.toLowerCase(), 32)
+      ]
+    });
+    
+    // Look for native ETH pool (currency0 === 0x00)
+    for (const log of logs) {
+      const c0 = '0x' + log.topics[2].slice(-40);
+      const c1 = '0x' + log.topics[3].slice(-40);
+      if (c0 === '0x0000000000000000000000000000000000000000') {
+        const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+          ['uint24', 'int24', 'address', 'uint160', 'int24'],
+          log.data
+        );
+        return {
+          currency0: c0,
+          currency1: c1,
+          fee: Number(decoded[0]),
+          tickSpacing: Number(decoded[1]),
+          hooks: decoded[2],
+          poolId: log.topics[1]
+        };
+      }
+    }
+  } catch (err) {
+    logger.debug('[RESOLVE V4 KEY] failed: ' + err.message);
+  }
+  return null;
+}
+
+async function approvePermit2IfNeeded(tokenAddr) {
+  const permit2Addr = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+  const routerAddr = '0x8876789976decbfcbbbe364623c63652db8c0904';
+  
+  const tokenContract = new ethers.Contract(tokenAddr, [
+    'function allowance(address owner, address spender) view returns (uint256)',
+    'function approve(address spender, uint256 amount) returns (bool)'
+  ], wallet);
+
+  // 1. Approve Permit2 contract on ERC20
+  const allowance = await tokenContract.allowance(wallet.address, permit2Addr);
+  const MaxUint256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935n;
+  
+  const feeData = await provider.getFeeData();
+  const multiplier = 200n;
+  const maxFee = (feeData.maxFeePerGas || feeData.gasPrice || 100000000n) * multiplier / 100n;
+  const maxPriority = (feeData.maxPriorityFeePerGas || (maxFee / 2n)) * multiplier / 100n;
+
+  if (allowance < MaxUint256 / 2n) {
+    logger.info(`Approving Permit2 for ${tokenAddr}...`);
+    const tx = await tokenContract.approve(permit2Addr, MaxUint256, {
+      maxFeePerGas: maxFee,
+      maxPriorityFeePerGas: maxPriority
+    });
+    await tx.wait();
+  }
+
+  // 2. Approve Universal Router on Permit2
+  const permit2Contract = new ethers.Contract(permit2Addr, [
+    'function allowance(address owner, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)',
+    'function approve(address token, address spender, uint160 amount, uint48 expiration)'
+  ], wallet);
+
+  const [pa] = await permit2Contract.allowance(wallet.address, tokenAddr, routerAddr);
+  if (pa < (1n << 159n)) {
+    logger.info(`Approving Universal Router on Permit2 for ${tokenAddr}...`);
+    const tx = await permit2Contract.approve(
+      tokenAddr,
+      routerAddr,
+      (1n << 160n) - 1n,
+      2n ** 48n - 1n,
+      {
+        maxFeePerGas: maxFee,
+        maxPriorityFeePerGas: maxPriority
+      }
+    );
+    await tx.wait();
+  }
+}
+
+async function sellV4(pos, sellAmt, exitType = 'MANUAL') {
+  const tokenAddr = pos.token;
+  const display = pos.symbol;
+  
+  if (pos.isPaper || globalThis.paperTrading) {
+    logger.info(`[PAPER V4 SELL] ${display} | token: ${tokenAddr}`);
+    await sendTg(`🧪 <b>[PAPER TRADE] [V4 SELL]</b> Sold <b>${display}</b> on Uniswap V4 pool.`);
+    
+    const original = positions.find(p => (p.token || p.curve).toLowerCase() === tokenAddr.toLowerCase());
+    if (original) {
+      const remaining = original.amount - (original.soldAmount || 0n) - sellAmt;
+      if (remaining <= 0n) {
+        positions = positions.filter(p => (p.token || p.curve).toLowerCase() !== tokenAddr.toLowerCase());
+      }
+    }
+    savePositions();
+    return;
+  }
+
+  logger.info(`[V4 SELL] ${display} | token: ${tokenAddr} | amount: ${ethers.formatEther(sellAmt)}`);
+  await sendTg(`⏳ <b>[V4 SELL]</b> Executing swap for <b>${display}</b>...`);
+
+  try {
+    // 1. Resolve PoolKey
+    const poolKey = await resolveV4PoolKey(tokenAddr);
+    if (!poolKey) {
+      throw new Error('Could not resolve V4 PoolKey for token');
+    }
+
+    // 2. Ensure Permit2 and Router approvals are set
+    await approvePermit2IfNeeded(tokenAddr);
+
+    // 3. Build V4 sell swap (zeroForOne = false)
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
+    const sw = buildV4Swap({
+      zeroForOne: false,
+      amountIn: sellAmt,
+      amountOutMin: 1n, // 1 wei minimum
+      deadline,
+      key: poolKey
+    });
+
+    const routerAddr = '0x8876789976decbfcbbbe364623c63652db8c0904';
+    const routerContract = new ethers.Contract(routerAddr, [
+      'function execute(bytes commands, bytes[] inputs, uint256 deadline) payable'
+    ], wallet);
+
+    // Dynamic gas calculation with 2.0x priority multiplier
+    const feeData = await provider.getFeeData();
+    const multiplier = 200n;
+    const maxFee = (feeData.maxFeePerGas || feeData.gasPrice || 100000000n) * multiplier / 100n;
+    const maxPriority = (feeData.maxPriorityFeePerGas || (maxFee / 2n)) * multiplier / 100n;
+
+    const tx = await routerContract.execute(sw.commands, sw.inputs, sw.deadline, {
+      value: sw.value, // 0 for selling token
+      maxFeePerGas: maxFee,
+      maxPriorityFeePerGas: maxPriority,
+      gasLimit: 850000n
+    });
+
+    logger.info(`[V4 SELL SUBMITTED] Hash: ${tx.hash}`);
+    await sendTg(`🚀 <b>[V4 SELL]</b> Submitted sell swap for <b>${display}</b> on Uniswap V4 pool:\nTx: <a href="${EXPLORER}/tx/${tx.hash}">${tx.hash.slice(0, 10)}...${tx.hash.slice(-6)}</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
+
+    const receipt = await tx.wait();
+    logger.info(`[V4 SELL MINED] Status: ${receipt.status} | Block: ${receipt.blockNumber}`);
+
+    // Update positions array
+    const original = positions.find(p => (p.token || p.curve).toLowerCase() === tokenAddr.toLowerCase());
+    if (original) {
+      const remaining = original.amount - (original.soldAmount || 0n) - sellAmt;
+      if (remaining <= 0n) {
+        positions = positions.filter(p => (p.token || p.curve).toLowerCase() !== tokenAddr.toLowerCase());
+      }
+    }
+    savePositions();
+
+    await sendTg(`✅ <b>[V4 SELL MINED]</b> Successfully sold <b>${display}</b> at block ${receipt.blockNumber}!`, { parse_mode: 'HTML' });
+
+  } catch (err) {
+    logger.error(`[V4 SELL ERROR] failed: ${err.message}`);
+    await sendTg(`❌ <b>[V4 SELL FAILED]</b> for <b>${display}</b>:\nError: <code>${err.message}</code>`);
   }
 }
 
@@ -2809,6 +3010,12 @@ async function sellPosition(pos, exitType = 'MANUAL') {
   const posCurve = pos.curve || pos.token;
   const posKey = pos.token || pos.curve;
   const sellAmt = pos.amount;
+
+  const isV4Pool = pos.isV4 || (await resolveV4PoolKey(posKey)) !== null;
+  if (isV4Pool) {
+    await sellV4(pos, sellAmt, exitType);
+    return;
+  }
 
   if (pos.isPaper || globalThis.paperTrading) {
     const exitPrice = await getLivePrice(posKey, posCurve);
