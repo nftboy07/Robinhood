@@ -2633,6 +2633,177 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
   }
 }
 
+// === UNISWAP V4 AUTO-SNIPER INTEGRATION ===
+
+function buildV4Swap({ zeroForOne, amountIn, amountOutMin, deadline, key }) {
+  const abi = ethers.AbiCoder.defaultAbiCoder();
+  const keyTuple = [key.currency0, key.currency1, key.fee, key.tickSpacing, key.hooks];
+  const inputCurrency = zeroForOne ? key.currency0 : key.currency1;
+  const outputCurrency = zeroForOne ? key.currency1 : key.currency0;
+
+  const actions = ethers.getBytes(
+    '0x' + [0x06, 0x0c, 0x0f] // ACT_SWAP_EXACT_IN_SINGLE, ACT_SETTLE_ALL, ACT_TAKE_ALL
+      .map(b => b.toString(16).padStart(2, '0')).join('')
+  );
+
+  const swapParams = abi.encode(
+    [`tuple(tuple(address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks) poolKey,bool zeroForOne,uint128 amountIn,uint128 amountOutMinimum,bytes hookData)`],
+    [[keyTuple, zeroForOne, amountIn, amountOutMin, '0x']]
+  );
+  const settleAll = abi.encode(['address', 'uint256'], [inputCurrency, amountIn]);
+  const takeAll   = abi.encode(['address', 'uint256'], [outputCurrency, amountOutMin]);
+
+  const v4Input = abi.encode(['bytes', 'bytes[]'], [actions, [swapParams, settleAll, takeAll]]);
+  const commands = '0x10'; // CMD_V4_SWAP
+
+  const value = zeroForOne ? amountIn : 0n;
+  return { commands, inputs: [v4Input], deadline, value };
+}
+
+function getV4PoolKeyFromReceipt(receipt, tokenAddr) {
+  const initTopic = '0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438';
+  for (const log of receipt.logs) {
+    if (log.topics[0].toLowerCase() === initTopic.toLowerCase()) {
+      const c0 = '0x' + log.topics[2].slice(-40);
+      const c1 = '0x' + log.topics[3].slice(-40);
+      if (c0.toLowerCase() === tokenAddr.toLowerCase() || c1.toLowerCase() === tokenAddr.toLowerCase()) {
+        try {
+          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+            ['uint24', 'int24', 'address', 'uint160', 'int24'],
+            log.data
+          );
+          return {
+            currency0: c0,
+            currency1: c1,
+            fee: Number(decoded[0]),
+            tickSpacing: Number(decoded[1]),
+            hooks: decoded[2],
+            poolId: log.topics[1]
+          };
+        } catch (e) {
+          logger.debug('Failed to decode V4 Initialize log: ' + e.message);
+        }
+      }
+    }
+  }
+  return null;
+}
+
+async function snipeV4(tokenAddr, display, poolKey) {
+  if (isPaused) {
+    logger.info(`[PAUSED] Skipping V4 snipe for ${display}`);
+    return;
+  }
+  if (positions.length >= MAX_POS) return;
+  if (!checkRiskLimits()) return;
+
+  const bal = await getBalance();
+  if (bal < SNIPE_AMOUNT * 2n) {
+    logger.warn(`[SKIP SNIPE V4] Low balance ${ethers.formatEther(bal)} ETH`);
+    await sendTg(`⚠️ Low balance ${ethers.formatEther(bal)} ETH - skipping V4 snipe`);
+    return;
+  }
+
+  if (globalThis.paperTrading) {
+    logger.info(`[PAPER SNIPE V4] ${display} | token: ${tokenAddr}`);
+    await sendTg(`🧪 <b>[PAPER TRADE] [AUTO-SNIPE V4]</b> Deployed paper trade for <b>${display}</b> on Uniswap V4 pool for ${ethers.formatEther(SNIPE_AMOUNT)} ETH.`);
+    
+    positions.push({
+      curve: tokenAddr.toLowerCase(),
+      token: tokenAddr.toLowerCase(),
+      symbol: display,
+      amount: SNIPE_AMOUNT * (10n**18n) / 1000000n, // dummy amount
+      entryPrice: 0n,
+      highestPrice: 0n,
+      isMigrated: true,
+      entryBlock: await provider.getBlockNumber().catch(() => 9999999),
+      soldAmount: 0n,
+      reEntries: 0,
+      tpReached: [],
+      entryTime: Date.now(),
+      isPaper: true,
+      isV4: true
+    });
+    savePositions();
+    return;
+  }
+
+  logger.info(`[AUTO SNIPE V4] ${display} | token: ${tokenAddr} | poolId: ${poolKey.poolId} | Size: ${ethers.formatEther(SNIPE_AMOUNT)} ETH`);
+  
+  try {
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
+    const sw = buildV4Swap({
+      zeroForOne: true,
+      amountIn: SNIPE_AMOUNT,
+      amountOutMin: 1n, // 1 wei minimum
+      deadline,
+      key: poolKey
+    });
+
+    const routerAddr = '0x8876789976decbfcbbbe364623c63652db8c0904';
+    const routerContract = new ethers.Contract(routerAddr, [
+      'function execute(bytes commands, bytes[] inputs, uint256 deadline) payable'
+    ], wallet);
+
+    // Dynamic gas calculation with 2.0x priority multiplier
+    const feeData = await provider.getFeeData();
+    const multiplier = 200n;
+    const maxFee = (feeData.maxFeePerGas || feeData.gasPrice || 100000000n) * multiplier / 100n;
+    const maxPriority = (feeData.maxPriorityFeePerGas || (maxFee / 2n)) * multiplier / 100n;
+
+    // Get balance before swap
+    const balBefore = await getTokenBalance(tokenAddr, wallet.address);
+
+    const tx = await routerContract.execute(sw.commands, sw.inputs, sw.deadline, {
+      value: sw.value,
+      maxFeePerGas: maxFee,
+      maxPriorityFeePerGas: maxPriority,
+      gasLimit: 850000n
+    });
+
+    logger.info(`[V4 SWAP SUBMITTED] Hash: ${tx.hash}`);
+    await sendTg(`🚀 <b>[AUTO-SNIPE V4]</b> Submitted buy swap for <b>${display}</b> on Uniswap V4 pool:\nTx: <a href="${EXPLORER}/tx/${tx.hash}">${tx.hash.slice(0, 10)}...${tx.hash.slice(-6)}</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
+
+    const receipt = await tx.wait();
+    logger.info(`[V4 SWAP MINED] Status: ${receipt.status} | Block: ${receipt.blockNumber}`);
+    
+    // Get balance after swap
+    const balAfter = await getTokenBalance(tokenAddr, wallet.address);
+    const amount = balAfter > balBefore ? (balAfter - balBefore) : 0n;
+
+    if (amount === 0n) {
+      logger.warn(`[V4 SNIPE] No tokens received for ${display}`);
+      await sendTg(`⚠️ V4 Snipe tx mined but no tokens received for ${display}. <a href="${EXPLORER}/tx/${tx.hash}">Check tx</a>`);
+      return;
+    }
+
+    // Log position to JSON
+    positions.push({
+      curve: tokenAddr.toLowerCase(),
+      token: tokenAddr.toLowerCase(),
+      symbol: display,
+      amount,
+      entryPrice: 0n,
+      highestPrice: 0n,
+      isMigrated: true, // Bypass SL/TP/Trailing stop check loop
+      entryBlock: receipt.blockNumber,
+      soldAmount: 0n,
+      reEntries: 0,
+      tpReached: [],
+      entryTime: Date.now(),
+      isPaper: false,
+      isV4: true // flag for V4
+    });
+    savePositions();
+
+    await sendTg(`✅ <b>[AUTO-SNIPE V4 MINED]</b> Successfully bought <b>${display}</b> at block ${receipt.blockNumber}!\n⚠️ <i>Sells are not automated for V4 pools; please sell manually on Bullscan or o1.exchange.</i>`, { parse_mode: 'HTML' });
+
+  } catch (err) {
+    logger.error(`[V4 SNIPE ERROR] failed: ${err.message}`);
+    await sendTg(`❌ <b>[V4 SNIPE FAILED]</b> for <b>${display}</b>:\nError: <code>${err.message}</code>`);
+  }
+}
+
 // ====================== SELL ======================
 async function sellPosition(pos, exitType = 'MANUAL') {
   const posCurve = pos.curve || pos.token;
@@ -3135,10 +3306,27 @@ async function pollNewLaunches() {
           // Auto snipe NOXA Fun launches (graduating bonding curves)
           setTimeout(() => snipe(curveAddr, display, tokenAddr), 2000);
         } else {
-          // ZeroHood / O1 launches: log to db for history lookup, but skip auto-snipe since direct EOA buying on v4 pools is not supported
+          // ZeroHood / O1 launches: log to db for history lookup
           const suffix = isO1 ? 'o1' : 'v4';
           recentLaunches.unshift({ addr: curveAddr, token: tokenAddr, symbol: `${display} (${suffix})`, time: Date.now() });
           if (recentLaunches.length > 10) recentLaunches.pop();
+
+          // Auto-snipe on Uniswap v4 pool
+          try {
+            const receipt = await directProvider.getTransactionReceipt(log.transactionHash);
+            if (receipt) {
+              const poolKey = getV4PoolKeyFromReceipt(receipt, tokenAddr);
+              if (poolKey) {
+                setTimeout(() => snipeV4(tokenAddr, display, poolKey), 2000);
+              } else {
+                logger.debug('[V4 LAUNCH] No Initialize log found in transaction receipt - skipping auto-snipe');
+              }
+            } else {
+              logger.debug('[V4 LAUNCH] Receipt not found yet - skipping auto-snipe');
+            }
+          } catch (receiptErr) {
+            logger.debug('[V4 LAUNCH] V4 receipt probe failed: ' + receiptErr.message);
+          }
         }
 
       } catch (logErr) {
