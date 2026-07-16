@@ -2536,8 +2536,15 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
     logger.info(`[PAUSED] Skipping snipe for ${sym}`);
     return;
   }
-  if (positions.length >= MAX_POS) return;
-  if (!checkRiskLimits()) return;
+  if (positions.length >= MAX_POS) {
+    logger.warn(`[SKIP SNIPE] Max positions limit reached (${positions.length}/${MAX_POS}) for ${sym}`);
+    sendTg(`⚠️ Max positions limit reached (<b>${positions.length}/${MAX_POS}</b>). Skipping auto-snipe for <b>${sym}</b>. Sell some positions to free up slots.`).catch(() => {});
+    return;
+  }
+  if (!checkRiskLimits()) {
+    logger.warn(`[SKIP SNIPE] Risk limits check failed for ${sym}`);
+    return;
+  }
 
   const bal = await getBalance();
   if (bal < SNIPE_AMOUNT * 2n) {
@@ -2744,8 +2751,15 @@ async function snipeV4(tokenAddr, display, poolKey, overrideAmountStr = null) {
     logger.info(`[PAUSED] Skipping V4 snipe for ${display}`);
     return;
   }
-  if (positions.length >= MAX_POS) return;
-  if (!checkRiskLimits()) return;
+  if (positions.length >= MAX_POS) {
+    logger.warn(`[SKIP SNIPE V4] Max positions limit reached (${positions.length}/${MAX_POS}) for ${display}`);
+    sendTg(`⚠️ Max positions limit reached (<b>${positions.length}/${MAX_POS}</b>). Skipping auto-snipe for <b>${display}</b>. Sell some positions to free up slots.`).catch(() => {});
+    return;
+  }
+  if (!checkRiskLimits()) {
+    logger.warn(`[SKIP SNIPE V4] Risk limits check failed for ${display}`);
+    return;
+  }
 
   const buyAmount = overrideAmountStr 
     ? ethers.parseEther(overrideAmountStr)
