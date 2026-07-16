@@ -1664,7 +1664,7 @@ async function handlePositions(chatId) {
     const balStr = ethers.formatEther(liveBal);
 
     // Live price
-    const price = await getCurrentPrice(posCurve).catch(() => 0n);
+    const price = await getLivePrice(posTok, posCurve).catch(() => 0n);
     const priceStr = price > 0n ? ethers.formatEther(price) : 'N/A';
 
     // Live value + PnL
@@ -1842,10 +1842,10 @@ async function getCurrentPrice(tokenAddr) {
     // Factory IS the bonding curve - call curves(token) on FACTORY
     const factory = new ethers.Contract(FACTORY, curveABI, provider);
     const state = await factory.curves(tokenAddr);
-    // state = [virtualEth, tokenBalance, graduated]
-    // Price = virtualEth / tokenBalance (ETH per token)
+    // state = [creator, tokenBalance, virtualEth, id]
+    // Price = (virtualEth * 10^6) / tokenBalance (ETH per token in Wei)
     if (state && state.tokenBalance > 0n) {
-      return (state.virtualEth * (10n ** 18n)) / state.tokenBalance;
+      return (state.virtualEth * (10n ** 6n)) / state.tokenBalance;
     }
     return 0n;
   } catch { return 0n; }
@@ -2143,14 +2143,46 @@ async function sendTxWithBumping(contractCallFn, label = 'tx') {
 
 // TRADES_HISTORY_FILE is declared as let at the top of the file
 
-// Fetch live price from either curve or DEX fallback
+async function getV4Price(tokenAddr) {
+  const poolKey = await resolveV4PoolKey(tokenAddr);
+  if (!poolKey) return 0n;
+
+  try {
+    const manager = new ethers.Contract('0x8366a39CC670B4001A1121B8F6A443A643e40951', [
+      'function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)'
+    ], provider);
+
+    const [sqrtPriceX96] = await manager.getSlot0(poolKey.poolId);
+    if (sqrtPriceX96 === 0n) return 0n;
+
+    // Price = (2^96 / sqrtPriceX96)^2 * 10^18 (in Wei per Token)
+    const numerator = (1n << 96n) * (10n ** 18n);
+    const quotient = numerator / sqrtPriceX96;
+    const priceWei = (quotient * quotient) / (10n ** 18n);
+    return priceWei;
+  } catch (err) {
+    logger.debug(`[V4 PRICE] failed for ${tokenAddr}: ${err.message}`);
+  }
+  return 0n;
+}
+
+// Fetch live price from V4 pool, curve, or V2 DEX fallback
 async function getLivePrice(tokenAddress, curveAddress = null) {
   const curve = curveAddress || tokenAddress;
+  
+  // 1. Try Uniswap V4 pool first
+  try {
+    const v4Price = await getV4Price(tokenAddress);
+    if (v4Price > 0n) return v4Price;
+  } catch {}
+
+  // 2. Try NOXA bonding curve
   try {
     const curvePrice = await getCurrentPrice(curve);
     if (curvePrice > 0n) return curvePrice;
   } catch {}
   
+  // 3. Try Uniswap V2 router fallback
   if (ROUTER && WETH) {
     try {
       const router = new ethers.Contract(ROUTER, routerABI, provider);
