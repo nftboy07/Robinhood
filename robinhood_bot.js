@@ -2414,6 +2414,55 @@ async function isHoneypotOrBad(curveAddress, tokenAddr = null) {
   }
 }
 
+async function isV4Honeypot(tokenAddr, display, poolKey, buyAmount) {
+  if (!HONEYPOT_CHECK) return false;
+  try {
+    // 1. Check bytecode similarity to verify standard token deployment template (ZeroHood/O1)
+    const isStandard = await checkBytecodeSimilarity(tokenAddr).catch(() => true);
+    if (!isStandard) {
+      logger.warn(`[V4 HONEYPOT] Skip launch due to custom non-standard bytecode on ${tokenAddr}`);
+      return true;
+    }
+
+    // 2. Perform Quoter swap simulations
+    const quoterAddr = '0x8dc178efb8111bb0973dd9d722ebeff267c98f94';
+    const quoter = new ethers.Contract(quoterAddr, [
+      'function quoteExactInputSingle((address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks) params, bool zeroForOne, uint256 amountIn, bytes hookData) external returns (uint256 amountOut, uint160 sqrtPriceX96After, int24 initializedTicksCrossed, uint256 gasEstimate)'
+    ], provider);
+
+    const keyTuple = [poolKey.currency0, poolKey.currency1, poolKey.fee, poolKey.tickSpacing, poolKey.hooks];
+
+    // Simulate Buy Quote
+    const buyQuote = await quoter.quoteExactInputSingle.staticCall(keyTuple, true, buyAmount, '0x').catch(() => null);
+    if (!buyQuote) {
+      logger.warn(`[V4 HONEYPOT] Buy quote simulation failed for ${display} (${tokenAddr})`);
+      return true;
+    }
+    const expectedTokens = buyQuote.amountOut;
+
+    // Simulate Sell Quote
+    const sellQuote = await quoter.quoteExactInputSingle.staticCall(keyTuple, false, expectedTokens, '0x').catch(() => null);
+    if (!sellQuote) {
+      logger.warn(`[V4 HONEYPOT] Sell quote simulation failed for ${display} (${tokenAddr})`);
+      return true;
+    }
+    const expectedEth = sellQuote.amountOut;
+
+    // Honeypot/Tax check: threshold 80%
+    const threshold = (buyAmount * 80n) / 100n;
+    if (expectedEth < threshold) {
+      logger.warn(`[V4 HONEYPOT] High sell tax/honeypot detected for ${display}. Sent: ${ethers.formatEther(buyAmount)} ETH, Expected Return: ${ethers.formatEther(expectedEth)} ETH`);
+      return true;
+    }
+
+    logger.info(`[V4 HONEYPOT] Passed simulation for ${display}. Expected return: ${ethers.formatEther(expectedEth)} ETH`);
+    return false;
+  } catch (err) {
+    logger.warn(`[V4 HONEYPOT] Simulation check error: ${err.message} - skipping safety filter to prevent false blocks`);
+    return false;
+  }
+}
+
 // Check daily risk limits
 function checkRiskLimits() {
   const now = Date.now();
@@ -2742,6 +2791,13 @@ async function snipeV4(tokenAddr, display, poolKey, overrideAmountStr = null) {
   if (bal < buyAmount * 2n) {
     logger.warn(`[SKIP SNIPE V4] Low balance ${ethers.formatEther(bal)} ETH`);
     await sendTg(`⚠️ Low balance ${ethers.formatEther(bal)} ETH - skipping V4 snipe`);
+    return;
+  }
+
+  // Honeypot / V4 safety check
+  if (await isV4Honeypot(tokenAddr, display, poolKey, buyAmount)) {
+    logger.warn(`[SKIP SNIPE V4] Honeypot or safety checks failed for ${tokenAddr}`);
+    await sendTg(`⚠️ Skipped suspicious V4 launch: ${display}`);
     return;
   }
 
