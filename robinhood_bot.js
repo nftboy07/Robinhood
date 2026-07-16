@@ -1675,9 +1675,10 @@ async function handlePositions(chatId) {
       const valueEth = parseFloat(ethers.formatEther(valueWei));
       valueStr = valueEth.toFixed(6) + ' ETH';
       if (p.entryPrice > 0n) {
-        const entryEth = parseFloat(ethers.formatEther(p.entryPrice));
-        const pnlEth = valueEth - entryEth;
-        const pnlPct = (pnlEth / entryEth) * 100;
+        const entryPriceEth = parseFloat(ethers.formatEther(p.entryPrice));
+        const currentPriceEth = parseFloat(ethers.formatEther(price));
+        const pnlPct = ((currentPriceEth - entryPriceEth) / entryPriceEth) * 100;
+        const pnlEth = valueEth - (parseFloat(ethers.formatEther(liveBal)) * entryPriceEth);
         const sign = pnlEth >= 0 ? '+' : '';
         pnlStr = ` | PnL: <b>${sign}${pnlEth.toFixed(4)} ETH (${sign}${pnlPct.toFixed(1)}%)</b>`;
       }
