@@ -2140,11 +2140,11 @@ async function getV4Price(tokenAddr) {
   if (!poolKey) return 0n;
 
   try {
-    const manager = new ethers.Contract('0x8366a39CC670B4001A1121B8F6A443A643e40951', [
+    const stateView = new ethers.Contract('0xf3334192d15450cdd385c8b70e03f9a6bd9e673b', [
       'function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)'
     ], provider);
 
-    const [sqrtPriceX96] = await manager.getSlot0(poolKey.poolId);
+    const [sqrtPriceX96] = await stateView.getSlot0(poolKey.poolId);
     if (sqrtPriceX96 === 0n) return 0n;
 
     // Price = (2^96 / sqrtPriceX96)^2 * 10^18 (in Wei per Token)
@@ -2845,44 +2845,27 @@ async function snipeV4(tokenAddr, display, poolKey, overrideAmountStr = null) {
 }
 
 async function resolveV4PoolKey(tokenAddr) {
-  const initTopic = '0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438';
-  const poolManager = '0x8366a39CC670B4001A1121B8F6A443A643e40951';
-  
   try {
-    const current = await directProvider.getBlockNumber();
-    const fromBlock = Math.max(0, current - 400000); // scan last ~400k blocks (fast)
-    
-    const logs = await directProvider.getLogs({
-      address: poolManager,
-      fromBlock,
-      toBlock: current,
-      topics: [
-        initTopic,
-        null,
-        null,
-        ethers.zeroPadValue(tokenAddr.toLowerCase(), 32)
-      ]
-    });
-    
-    // Look for native ETH pool (currency0 === 0x00)
-    for (const log of logs) {
-      const c0 = '0x' + log.topics[2].slice(-40);
-      const c1 = '0x' + log.topics[3].slice(-40);
-      if (c0 === '0x0000000000000000000000000000000000000000') {
-        const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-          ['uint24', 'int24', 'address', 'uint160', 'int24'],
-          log.data
-        );
-        return {
-          currency0: c0,
-          currency1: c1,
-          fee: Number(decoded[0]),
-          tickSpacing: Number(decoded[1]),
-          hooks: decoded[2],
-          poolId: log.topics[1]
-        };
-      }
-    }
+    const c0 = '0x0000000000000000000000000000000000000000';
+    const c1 = tokenAddr.toLowerCase();
+    const fee = 0;
+    const tickSpacing = 200;
+    const hooks = '0x441F773B3bb1Ed4c6457D0528624112e43C02acc';
+
+    const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
+      ['address', 'address', 'uint24', 'int24', 'address'],
+      [c0, c1, fee, tickSpacing, hooks]
+    );
+    const poolId = ethers.keccak256(encoded);
+
+    return {
+      currency0: c0,
+      currency1: c1,
+      fee,
+      tickSpacing,
+      hooks,
+      poolId
+    };
   } catch (err) {
     logger.debug('[RESOLVE V4 KEY] failed: ' + err.message);
   }
