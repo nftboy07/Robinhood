@@ -3520,19 +3520,24 @@ async function pollNewLaunches() {
 
           // Auto-snipe on Uniswap v4 pool
           try {
-            const receipt = await directProvider.getTransactionReceipt(log.transactionHash);
+            let receipt = null;
+            for (let attempt = 1; attempt <= 10; attempt++) {
+              receipt = await directProvider.getTransactionReceipt(log.transactionHash).catch(() => null);
+              if (receipt) break;
+              await new Promise(resolve => setTimeout(resolve, 500));
+            }
             if (receipt) {
               const poolKey = getV4PoolKeyFromReceipt(receipt, tokenAddr);
               if (poolKey) {
                 setTimeout(() => snipeV4(tokenAddr, display, poolKey), 2000);
               } else {
-                logger.debug('[V4 LAUNCH] No Initialize log found in transaction receipt - skipping auto-snipe');
+                logger.warn(`[V4 LAUNCH] No Initialize log found in receipt for ${display} (${tokenAddr}) - skipping auto-snipe`);
               }
             } else {
-              logger.debug('[V4 LAUNCH] Receipt not found yet - skipping auto-snipe');
+              logger.warn(`[V4 LAUNCH] Receipt not found after 10 attempts for ${display} (${tokenAddr}) - skipping auto-snipe`);
             }
           } catch (receiptErr) {
-            logger.debug('[V4 LAUNCH] V4 receipt probe failed: ' + receiptErr.message);
+            logger.error(`[V4 LAUNCH] V4 receipt probe error: ${receiptErr.message}`);
           }
         }
 
