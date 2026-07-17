@@ -207,9 +207,9 @@ const curveABI = [
   // FACTORY = bonding curve hub - pass token address, send ETH value for buy
   'function buy(address token) external payable',
   'function sell(address token, uint256 tokenAmount) external',
-  // curves() returns: (address creator, uint256 tokenBalance, uint256 virtualEth, uint256 id)
+  // curves() returns: (address creator, uint256 virtualEth, uint256 tokenBalance, uint256 id)
   // Graduation = tokenBalance == 0n (all tokens sold from curve)
-  'function curves(address token) external view returns (address creator, uint256 tokenBalance, uint256 virtualEth, uint256 id)',
+  'function curves(address token) external view returns (address creator, uint256 virtualEth, uint256 tokenBalance, uint256 id)',
   'function createToken(string name, string symbol) external payable returns (address)',
   'function tokenCount() external view returns (uint256)',
   'event TokenCreated(address indexed token, address indexed creator, string name, string symbol, uint256)',
@@ -1843,10 +1843,10 @@ async function getCurrentPrice(tokenAddr) {
     // Factory IS the bonding curve - call curves(token) on FACTORY
     const factory = new ethers.Contract(FACTORY, curveABI, provider);
     const state = await factory.curves(tokenAddr);
-    // state = [creator, tokenBalance, virtualEth, id]
-    // Price = (virtualEth * 10^6) / tokenBalance (ETH per token in Wei)
+    // state = [creator, virtualEth, tokenBalance, id]
+    // Price = (virtualEth * 10^18) / tokenBalance (ETH per token in Wei)
     if (state && state.tokenBalance > 0n) {
-      return (state.virtualEth * (10n ** 6n)) / state.tokenBalance;
+      return (state.virtualEth * (10n ** 18n)) / state.tokenBalance;
     }
     return 0n;
   } catch { return 0n; }
