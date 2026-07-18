@@ -1646,6 +1646,67 @@ async function importTokensFromBlockscout(chatId) {
   }
 }
 
+async function getDeBankPortfolio(walletAddress) {
+  const apiKey = config.debankKey || process.env.DEBANK_KEY;
+  if (!apiKey || apiKey.includes('REPLACE')) return null;
+
+  try {
+    const url = `https://pro-openapi.debank.com/v1/user/all_token_list?id=${walletAddress}`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'accept': 'application/json',
+        'AccessKey': apiKey
+      }
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      logger.warn(`[DEBANK] API request failed: ${res.status} - ${errText}`);
+      return null;
+    }
+
+    const data = await res.json();
+    if (!Array.isArray(data)) {
+      logger.warn(`[DEBANK] Expected array response, got: ${JSON.stringify(data)}`);
+      return null;
+    }
+
+    const portfolio = new Map();
+    let ethPriceUsd = 3000;
+
+    for (const item of data) {
+      if (item.symbol === 'ETH' && (!item.id || item.id === 'eth')) {
+        ethPriceUsd = parseFloat(item.price) || ethPriceUsd;
+      }
+      if (item.id) {
+        portfolio.set(item.id.toLowerCase(), {
+          amount: parseFloat(item.amount) || 0,
+          priceUsd: parseFloat(item.price) || 0,
+          symbol: item.symbol,
+          name: item.name
+        });
+      }
+    }
+
+    const ethItem = data.find(i => i.id === 'eth' || i.symbol === 'ETH');
+    portfolio.set('eth', {
+      amount: ethItem ? parseFloat(ethItem.amount) : 0,
+      priceUsd: ethPriceUsd,
+      symbol: 'ETH',
+      name: 'Ethereum'
+    });
+
+    return {
+      portfolio,
+      ethPriceUsd
+    };
+  } catch (err) {
+    logger.warn(`[DEBANK] Error querying portfolio: ${err.message}`);
+    return null;
+  }
+}
+
 async function handlePositions(chatId) {
   if (positions.length === 0) {
     await telegramBot.sendMessage(chatId, '📍 No open positions tracked.\n\nUse /status to see your balance or /history for past trades.');
@@ -1654,17 +1715,28 @@ async function handlePositions(chatId) {
 
   await sendTg('⏳ Loading live position data...');
 
-  // Resolve all positions in parallel with live on-chain data
+  const debankData = await getDeBankPortfolio(wallet.address).catch(() => null);
+
+  // Resolve all positions in parallel
   const resolvedPositions = await Promise.all(positions.map(async (p, i) => {
     const posTok = p.token || p.curve;
     const posCurve = p.curve || p.token;
 
-    // Live balance from chain
-    const liveBal = await getTokenBalance(posTok, wallet.address).catch(() => 0n);
-    const balStr = ethers.formatEther(liveBal);
+    let liveBal;
+    let price;
 
-    // Live price
-    const price = await getLivePrice(posTok, posCurve).catch(() => 0n);
+    const debankToken = debankData ? debankData.portfolio.get(posTok.toLowerCase()) : null;
+
+    if (debankToken && debankToken.amount > 0 && debankToken.priceUsd > 0 && debankData.ethPriceUsd > 0) {
+      liveBal = ethers.parseEther(debankToken.amount.toString());
+      price = ethers.parseEther((debankToken.priceUsd / debankData.ethPriceUsd).toFixed(18));
+      logger.info(`[DEBANK DATA] Loaded ${p.symbol} from DeBank API: Balance: ${debankToken.amount}, Price: ${debankToken.priceUsd} USD`);
+    } else {
+      // Fallback: direct on-chain query
+      liveBal = await getTokenBalance(posTok, wallet.address).catch(() => 0n);
+      price = await getLivePrice(posTok, posCurve).catch(() => 0n);
+    }
+    const balStr = ethers.formatEther(liveBal);
     const priceStr = price > 0n ? ethers.formatEther(price) : 'N/A';
 
     // Live value + PnL
