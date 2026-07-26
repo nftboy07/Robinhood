@@ -13,7 +13,8 @@
     "build:contract": "node scripts/compile.js",
     "deploy": "node deploy.js",
     "deposit": "node deposit.js",
-    "withdraw": "node withdraw.js"
+    "withdraw": "node withdraw.js",
+    "balance": "node balance.js"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

@@ -73,7 +73,7 @@ export async function notifyStartup(mode, markets) {
 const usdParen = (x) => { const u = usdOf(x); return u ? ` (${u})` : ''; };
 
 // EOA-mode: separate calls per leg (card style)
-export async function notifyBuy({ symbol, venue, ethIn, tokens, hash }) {
+export async function notifyBuy({ token, symbol, venue, ethIn, tokens, hash }) {
   await refreshEthUsd();
   return tg(card([
     `🟢 <b>${symbol} Buy</b>`,
@@ -81,10 +81,10 @@ export async function notifyBuy({ symbol, venue, ethIn, tokens, hash }) {
     `🟢 <b>BUY</b> @ ${venue}`,
     `<code>${e6(ethIn)} ETH</code>${usdParen(ethIn)} → <code>${tokN(tokens)} ${symbol}</code>`,
     ``,
-    `🔗 ${txLink(hash)}`,
+    `🔗 ${txLink(hash)} | <a href="https://bullscan.fun/robinhood/token/${token}">Bullscan</a>`,
   ]));
 }
-export async function notifySell({ symbol, venue, tokens, ethOut, hash }) {
+export async function notifySell({ token, symbol, venue, tokens, ethOut, hash }) {
   await refreshEthUsd();
   return tg(card([
     `🔴 <b>${symbol} Sell</b>`,
@@ -92,12 +92,12 @@ export async function notifySell({ symbol, venue, tokens, ethOut, hash }) {
     `🔴 <b>SELL</b> @ ${venue}`,
     `<code>${tokN(tokens)} ${symbol}</code> → <code>${e6(ethOut)} ETH</code>${usdParen(ethOut)}`,
     ``,
-    `🔗 ${txLink(hash)}`,
+    `🔗 ${txLink(hash)} | <a href="https://bullscan.fun/robinhood/token/${token}">Bullscan</a>`,
   ]));
 }
 
 // Atomic-mode: ONE card with BUY, SELL and net P/L.
-export async function notifyAtomic({ symbol, dir, buyVenue, sellVenue, sizeEth, receipt, netEth }) {
+export async function notifyAtomic({ token, symbol, dir, buyVenue, sellVenue, sizeEth, receipt, netEth }) {
   await refreshEthUsd();
   const sw = parseSwap(receipt);
   const tokStr = sw ? tokN(sw.tokenAbs) : '?';
@@ -123,7 +123,7 @@ export async function notifyAtomic({ symbol, dir, buyVenue, sellVenue, sizeEth, 
     `📊 <b>NET</b>`,
     `<code>${netSign}${e6(abs)} ETH</code>${netUsd} • ${dir === 'A' ? 'curve → V4' : 'V4 → curve'}`,
     ``,
-    `🔗 ${txLink(receipt.hash, 'Atomic TX')}`,
+    `🔗 ${txLink(receipt.hash, 'Atomic TX')} | <a href="https://bullscan.fun/robinhood/token/${token}">Bullscan</a>`,
   ]));
 }
 

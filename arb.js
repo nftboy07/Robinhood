@@ -106,6 +106,16 @@ async function main() {
     const back = await curve.quoteSell(m.token, tok).catch(() => 0n);
     return { net: back - ethIn - gasCost, tok, back, pool: m.pools[bi] };
   }
+  async function netC(m, ethIn) { // 3-leg triangular: WETH -> curve/V4 Token -> USDG -> WETH
+    const tok = await curve.quoteBuy(m.token, ethIn).catch(() => 0n);
+    if (!tok) return { net: -ethIn, tok: 0n, back: 0n, pool: null };
+    const usdgKey = { currency0: m.token, currency1: '0x0bd7d308f8e1639fab988df18a8011f41eacad73', fee: 3000, tickSpacing: 60, hooks: '0x0000000000000000000000000000000000000000' };
+    const usdgOut = await quoter.quoteExactInputSingle.staticCall([keyTuple(usdgKey), false, tok, '0x']).then(r => r[0]).catch(() => 0n);
+    if (!usdgOut) return { net: -ethIn, tok, back: 0n, pool: null };
+    const wethKey = { currency0: '0x0bd7d308f8e1639fab988df18a8011f41eacad73', currency1: '0x0bd7d308f8e1639fab988df18a8011f41eacad73', fee: 500, tickSpacing: 10, hooks: '0x0000000000000000000000000000000000000000' };
+    const back = await quoter.quoteExactInputSingle.staticCall([keyTuple(wethKey), false, usdgOut, '0x']).then(r => r[0]).catch(() => 0n);
+    return { net: back - ethIn - gasCost, tok, back, pool: { name: '3-leg USDG', id: 'usdg-tri' } };
+  }
   // geometric grid of probe sizes — deterministic, RPC-friendly (vs ternary storms)
   const GRID = Number(process.env.GRID_POINTS || 6);
   const gridSizes = (() => {
@@ -119,10 +129,12 @@ async function main() {
     return rs.filter(Boolean).reduce((a, b) => (!a || b.net > a.net ? b : a), null);
   }
   async function scanMarket(m) {
-    const [A, B] = await Promise.all([bestDir(m, netA), bestDir(m, netB)]);
+    const [A, B, C] = await Promise.all([bestDir(m, netA), bestDir(m, netB), bestDir(m, netC)]);
     const a = { dir: 'A', tag: 'curve->V4', market: m, ...A };
     const b = { dir: 'B', tag: 'V4->curve', market: m, ...B };
-    return (A && B) ? (a.net >= b.net ? a : b) : null;
+    const c = { dir: 'C', tag: '3-leg-triangular', market: m, ...C };
+    const valid = [a, b, c].filter(x => x.net !== undefined && x.net !== null);
+    return valid.sort((x, y) => (y.net > x.net ? 1 : -1))[0] || null;
   }
   async function scanAll() {
     const results = await Promise.all(markets.map(m => scanMarket(m).catch(() => null)));
@@ -131,18 +143,34 @@ async function main() {
 
   // EOA-mode lazy approvals per token
   const eoaApproved = new Set();
+  async function getGasOverrides() {
+    try {
+      const feeData = await provider.getFeeData();
+      const multiplier = 200n; // 2.0x priority multiplier to avoid mempool sticking
+      const maxFee = (feeData.maxFeePerGas || feeData.gasPrice || 100000000n) * multiplier / 100n;
+      const maxPriority = (feeData.maxPriorityFeePerGas || (maxFee / 2n)) * multiplier / 100n;
+      return {
+        maxFeePerGas: maxFee,
+        maxPriorityFeePerGas: maxPriority
+      };
+    } catch (e) {
+      return {};
+    }
+  }
+
   async function ensureEOA(tokenAddr) {
     if (executor || eoaApproved.has(tokenAddr)) return;
     const t = erc(tokenAddr);
+    const overrides = await getGasOverrides();
     for (const [sp] of [[V4.permit2], [CURVE.address]]) {
-      if ((await t.allowance(wallet.address, sp)) < MaxUint256 / 2n) await (await t.approve(sp, MaxUint256)).wait();
+      if ((await t.allowance(wallet.address, sp)) < MaxUint256 / 2n) await (await t.approve(sp, MaxUint256, overrides)).wait();
     }
     const [pa] = await permit2.allowance(wallet.address, tokenAddr, V4.universalRouter);
-    if (pa < (1n << 159n)) await (await permit2.approve(tokenAddr, V4.universalRouter, (1n << 160n) - 1n, 2n ** 48n - 1n)).wait();
+    if (pa < (1n << 159n)) await (await permit2.approve(tokenAddr, V4.universalRouter, (1n << 160n) - 1n, 2n ** 48n - 1n, overrides)).wait();
     eoaApproved.add(tokenAddr);
   }
 
-  async function execute(b) {
+  async function execute(b, overrides) {
     const token = b.market.token;
     const minProfit = (b.size * CFG.minProfitBps) / 10000n;
     const minEth = b.size + minProfit;
@@ -154,85 +182,93 @@ async function main() {
       const minTok = bpsDown(b.tok, CFG.slippageBps);
       console.log(`  [atomic ${b.dir}] ${b.market.symbol} pool=${b.pool.name} size=${formatEther(b.size)}`);
       const call = b.dir === 'A'
-        ? executor.curveToV4(token, b.size, minTok, keyTuple(b.pool.key), minEth, minProfit)
-        : executor.v4ToCurve(token, b.size, minTok, keyTuple(b.pool.key), minEth, minProfit);
+        ? executor.curveToV4(token, b.size, minTok, keyTuple(b.pool.key), minEth, minProfit, overrides)
+        : executor.v4ToCurve(token, b.size, minTok, keyTuple(b.pool.key), minEth, minProfit, overrides);
       const rc = await (await call).wait();
       console.log('  tx', rc.hash);
       // fire-and-forget so a notif hiccup can never block/crash the trade loop
-      notifyAtomic({ symbol: b.market.symbol, dir: b.dir, buyVenue: b.dir === 'A' ? 'curve' : `V4 ${b.pool.name}`, sellVenue: b.dir === 'A' ? `V4 ${b.pool.name}` : 'curve', sizeEth: b.size, receipt: rc, netEth: 0n }).catch(() => {});
+      notifyAtomic({ token: token, symbol: b.market.symbol, dir: b.dir, buyVenue: b.dir === 'A' ? 'curve' : `V4 ${b.pool.name}`, sellVenue: b.dir === 'A' ? `V4 ${b.pool.name}` : 'curve', sizeEth: b.size, receipt: rc, netEth: 0n }).catch(() => {});
       return;
     }
     await ensureEOA(token);
-    if (b.dir === 'A') return execEOA_A(b);
-    return execEOA_B(b);
+    if (b.dir === 'A') return execEOA_A(b, overrides);
+    return execEOA_B(b, overrides);
   }
 
-  async function execEOA_A(b) {
+  async function execEOA_A(b, overrides) {
     const token = b.market.token, t = erc(token);
     const q = await curve.quoteBuy(token, b.size);
     const before = await t.balanceOf(wallet.address);
     console.log(`  [A] buy curve ${b.market.symbol} ${formatEther(b.size)} ETH`);
-    const buyRc = await (await curve.buy(token, bpsDown(q, CFG.slippageBps), { value: b.size })).wait();
+    const buyRc = await (await curve.buy(token, bpsDown(q, CFG.slippageBps), { value: b.size, ...overrides })).wait();
     const got = (await t.balanceOf(wallet.address)) - before;
-    await notifyBuy({ symbol: b.market.symbol, venue: 'curve', ethIn: b.size, tokens: got, hash: buyRc.hash });
+    await notifyBuy({ token: token, symbol: b.market.symbol, venue: 'curve', ethIn: b.size, tokens: got, hash: buyRc.hash });
     const target = b.size + gasCost + (b.size * CFG.minProfitBps) / 10000n;
     try {
       const sw = buildV4Swap({ zeroForOne: false, amountIn: got, amountOutMin: target, deadline: deadline(), key: b.pool.key });
       console.log(`  [A] sell V4 ${b.pool.name} ${formatEther(got)} tok, min ${formatEther(target)} ETH`);
-      const sellRc = await (await router.execute(sw.commands, sw.inputs, sw.deadline, { value: sw.value })).wait();
+      const sellRc = await (await router.execute(sw.commands, sw.inputs, sw.deadline, { value: sw.value, ...overrides })).wait();
       console.log('  PROFIT tx', sellRc.hash);
       const s = parseSwap(sellRc);
-      await notifySell({ symbol: b.market.symbol, venue: `V4 ${b.pool.name}`, tokens: got, ethOut: s ? s.ethAbs : 0n, hash: sellRc.hash });
+      await notifySell({ token: token, symbol: b.market.symbol, venue: `V4 ${b.pool.name}`, tokens: got, ethOut: s ? s.ethAbs : 0n, hash: sellRc.hash });
     } catch (e) {
       console.log('  missed window -> unwind on curve:', e.shortMessage || e.message);
       const minEth = bpsDown(await curve.quoteSell(token, got), CFG.slippageBps);
-      const unwRc = await (await curve.sell(token, got, minEth)).wait();
+      const unwRc = await (await curve.sell(token, got, minEth, overrides)).wait();
       console.log('  unwound tx', unwRc.hash);
       await tg(`↩️ <b>UNWIND</b> ${b.market.symbol} on curve (window closed) — tx ${unwRc.hash.slice(0, 10)}…`);
     }
   }
-  async function execEOA_B(b) {
+  async function execEOA_B(b, overrides) {
     const token = b.market.token, t = erc(token);
     const before = await t.balanceOf(wallet.address);
     const sw = buildV4Swap({ zeroForOne: true, amountIn: b.size, amountOutMin: bpsDown(b.tok, CFG.slippageBps), deadline: deadline(), key: b.pool.key });
     console.log(`  [B] buy V4 ${b.pool.name} ${b.market.symbol} ${formatEther(b.size)} ETH`);
-    const buyRc = await (await router.execute(sw.commands, sw.inputs, sw.deadline, { value: sw.value })).wait();
+    const buyRc = await (await router.execute(sw.commands, sw.inputs, sw.deadline, { value: sw.value, ...overrides })).wait();
     const got = (await t.balanceOf(wallet.address)) - before;
-    await notifyBuy({ symbol: b.market.symbol, venue: `V4 ${b.pool.name}`, ethIn: b.size, tokens: got, hash: buyRc.hash });
+    await notifyBuy({ token: token, symbol: b.market.symbol, venue: `V4 ${b.pool.name}`, ethIn: b.size, tokens: got, hash: buyRc.hash });
     const qSell = await curve.quoteSell(token, got);
     const minEth = bpsDown(qSell, CFG.slippageBps);
     console.log(`  [B] sell curve ${formatEther(got)} tok, min ${formatEther(minEth)} ETH`);
-    const sellRc = await (await curve.sell(token, got, minEth)).wait();
+    const sellRc = await (await curve.sell(token, got, minEth, overrides)).wait();
     console.log('  done tx', sellRc.hash);
-    await notifySell({ symbol: b.market.symbol, venue: 'curve', tokens: got, ethOut: qSell, hash: sellRc.hash });
+    await notifySell({ token: token, symbol: b.market.symbol, venue: 'curve', tokens: got, ethOut: qSell, hash: sellRc.hash });
   }
 
-  let busy = false, lastLog = 0;
+  let busy = false, scanning = false, lastLog = 0;
   async function tick(trigger = 'poll') {
-    if (busy) return;
-    const all = await scanAll();
-    if (!all.length) return;
-    const b = all[0];
-    const bps = b.size > 0n ? (b.net * 10000n) / b.size : 0n;
-    const line = `${new Date().toISOString()} [${trigger}] best=${b.market.symbol} ${b.tag}@${b.pool?.name} size=${formatEther(b.size)} net=${formatEther(b.net)} (${bps} bps)`;
-    if (bps >= CFG.minProfitBps) {
-      console.log('>>> OPPORTUNITY', line);
-      if (!CFG.live || !wallet) { console.log('    (idle: dry-run/no wallet)'); return; }
-      busy = true;
-      try {
-        // hard 120s cap: a hung RPC inside execute() must never leave busy=true
-        // and stall the bot past the next window (that missed a live opportunity).
-        await Promise.race([execute(b), new Promise((_, rej) => setTimeout(() => rej(new Error('execute timeout 120s')), 120000))]);
-      } catch (e) {
-        console.log('    exec FAILED:', e.shortMessage || e.message);
-        notifyError(`${b.market.symbol} ${b.tag}: ${e.shortMessage || e.message}`).catch(() => {});
-      } finally {
-        busy = false;
-        // non-blocking gas refresh — getFeeData must not hang the busy reset
-        provider.getFeeData().then((fd) => { gasCost = (fd.gasPrice ?? gasPrice) * CFG.gasUnits; }).catch(() => {});
+    if (busy || scanning) return;
+    scanning = true;
+    try {
+      const all = await scanAll();
+      if (!all.length) return;
+      const b = all[0];
+      const bps = b.size > 0n ? (b.net * 10000n) / b.size : 0n;
+      const line = `${new Date().toISOString()} [${trigger}] best=${b.market.symbol} ${b.tag}@${b.pool?.name} size=${formatEther(b.size)} net=${formatEther(b.net)} (${bps} bps)`;
+      if (bps >= CFG.minProfitBps) {
+        console.log('>>> OPPORTUNITY', line);
+        if (!CFG.live || !wallet) { console.log('    (idle: dry-run/no wallet)'); return; }
+        busy = true;
+        try {
+          // hard 120s cap: a hung RPC inside execute() must never leave busy=true
+          // and stall the bot past the next window (that missed a live opportunity).
+          const overrides = await getGasOverrides();
+          await Promise.race([execute(b, overrides), new Promise((_, rej) => setTimeout(() => rej(new Error('execute timeout 120s')), 120000))]);
+        } catch (e) {
+          console.log('    exec FAILED:', e.shortMessage || e.message);
+          notifyError(`${b.market.symbol} ${b.tag}: ${e.shortMessage || e.message}`).catch(() => {});
+        } finally {
+          busy = false;
+          // non-blocking gas refresh — getFeeData must not hang the busy reset
+          provider.getFeeData().then((fd) => { gasCost = (fd.gasPrice ?? gasPrice) * CFG.gasUnits; }).catch(() => {});
+        }
+      } else if (Date.now() - lastLog > 15000 || trigger === 'swap') {
+        lastLog = Date.now(); console.log('idle    ', line);
       }
-    } else if (Date.now() - lastLog > 15000 || trigger === 'swap') {
-      lastLog = Date.now(); console.log('idle    ', line);
+    } catch (e) {
+      console.log('scan failed:', e.message);
+    } finally {
+      scanning = false;
     }
   }
 
@@ -264,7 +300,9 @@ async function main() {
   async function onNewPool(log) {
     try {
       const poolId = log.topics[1];
-      if (knownPoolIds.has(poolId.toLowerCase())) return;
+      const pidLower = poolId.toLowerCase();
+      if (knownPoolIds.has(pidLower)) return;
+      knownPoolIds.add(pidLower);
       const c0 = getAddress('0x' + log.topics[2].slice(26));
       if (BigInt(c0) !== 0n) return;                         // require native ETH currency0
       const c1 = getAddress('0x' + log.topics[3].slice(26));
@@ -276,11 +314,10 @@ async function main() {
       const pool = { name: (Number(fee) / 1e6 * 100) + '%', id: poolId, key };
       let m = markets.find(x => x.token.toLowerCase() === c1.toLowerCase());
       if (m) m.pools.push(pool); else { m = { token: c1, symbol: sym, pools: [pool] }; markets.push(m); }
-      knownPoolIds.add(poolId.toLowerCase());
       provider.on({ address: V4.poolManager, topics: [swapTopic, poolId] }, () => tick('swap'));
       persistWatchlist();
       console.log(`NEW POOL: ${sym} @ ${pool.name} (${c1})`);
-      await tg(`🆕 <b>New token detected</b>: ${sym} @ ${pool.name} pool — now watching`);
+      // Muted to prevent spam: await tg(`🆕 <b>New token detected</b>: ${sym} @ ${pool.name} pool — now watching`);
       tick('newpool');
     } catch { /* ignore malformed logs */ }
   }
