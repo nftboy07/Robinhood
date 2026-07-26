@@ -76,7 +76,10 @@
     "dailyCapEth": 0.01,
     "sources": [
       "watch-spike",
-      "feed-new"
+      "feed-new",
+      "manual-cmd",
+      "gmgn-trending",
+      "noxa-curve"
     ]
   }
 }

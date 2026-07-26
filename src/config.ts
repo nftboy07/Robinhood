@@ -92,7 +92,7 @@ const AutoLpSchema = z.object({
   maxOpen: z.number().int().default(3), // max concurrent LP positions total
   maxPerHour: z.number().int().default(2), // rate limit
   dailyCapEth: z.number().default(0.01), // max ETH auto-deployed per 24h
-  sources: z.array(z.enum(["feed-new", "watch-spike"])).default(["watch-spike"]),
+  sources: z.array(z.string()).default(["watch-spike"]),
 });
 
 const ConfigSchema = z.object({
