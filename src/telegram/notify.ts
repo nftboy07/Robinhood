@@ -39,19 +39,19 @@ export async function notifySpike(h: SpikeHit, verdict: Verdict | null = null): 
   const T = [
     `${padR("vol 5m", 8)} ${arrow}  (${(h.vol5m / Math.max(h.prevVol5m, 1)).toFixed(1)}×)`,
     `${padR("vol 1h", 8)} $${(h.vol1h / 1000).toFixed(0)}k`,
-    `${padR("likuid", 8)} $${(h.liq / 1000).toFixed(0)}k`,
+    `${padR("liquidity", 8)} $${(h.liq / 1000).toFixed(0)}k`,
   ];
   if (h.fdv) T.push(`${padR("MCAP", 8)} ${fmtMcap(h.fdv)}`);
   T.push(
-    `${padR("harga", 8)} ${h.chg5m >= 0 ? "+" : ""}${h.chg5m.toFixed(1)}% (5m) · ${h.chg1h >= 0 ? "+" : ""}${h.chg1h.toFixed(1)}% (1h)`,
+    `${padR("price", 8)} ${h.chg5m >= 0 ? "+" : ""}${h.chg5m.toFixed(1)}% (5m) · ${h.chg1h >= 0 ? "+" : ""}${h.chg1h.toFixed(1)}% (1h)`,
   );
   T.push("");
-  T.push(`✅ AMAN — ${h.safe.reason}`);
-  T.push(`   tes beli 0.01Ξ → jual balik: ${h.safe.backPct.toFixed(1)}%`);
+  T.push(`✅ SAFE — ${h.safe.reason}`);
+  T.push(`   test buy 0.01Ξ → sell back: ${h.safe.backPct.toFixed(1)}%`);
 
   await send(
     [
-      `🚨 <b>VOLUME NANJAK</b> · ${tokenEmoji(h.symbol)} <b>${esc(h.symbol)}</b>`,
+      `🚨 <b>VOLUME SPIKE</b> · ${tokenEmoji(h.symbol)} <b>${esc(h.symbol)}</b>`,
       pre(T.join("\n")),
       ...radarLines(verdict),
       `<code>${h.addr}</code>`,
@@ -78,13 +78,13 @@ export async function notifyNewToken(a: NewTokenAlert, verdict: Verdict | null =
     a.wethSeed > 0 ? `${padR("WETH seed", 9)} ${a.wethSeed.toFixed(4)}Ξ` : "",
     ``,
     `✅ honeypot check — ${a.safeReason}`,
-    `   beli 0.01Ξ → jual balik: ${a.backPct.toFixed(1)}%`,
+    `   buy 0.01Ξ → sell back: ${a.backPct.toFixed(1)}%`,
   ].filter(Boolean);
 
   await send(
     [
-      `🆕 <b>TOKEN BARU (feed)</b> · ${tokenEmoji(a.symbol)} <b>${esc(a.symbol)}</b>`,
-      `<i>ketangkep real-time dari sequencer — DexScreener kemungkinan belum index</i>`,
+      `🆕 <b>NEW TOKEN (feed)</b> · ${tokenEmoji(a.symbol)} <b>${esc(a.symbol)}</b>`,
+      `<i>captured real-time from sequencer — DexScreener likely not indexed yet</i>`,
       pre(T.join("\n")),
       ...radarLines(verdict),
       `<code>${a.token}</code>`,
@@ -109,10 +109,10 @@ export async function notifyAutoLp(r: AutoLpResult): Promise<void> {
   await send(
     [
       `🤖 <b>AUTO-LP</b> · ${tokenEmoji(r.symbol)} <b>${esc(r.symbol)}</b> #${res.tokenId ?? "?"} ${res.mode === "inrange" ? "🎯" : "🛡"}`,
-      `Otomatis dibuka ${r.sizeEth}Ξ (${res.side})`,
+      `Automatically opened ${r.sizeEth}Ξ (${res.side})`,
       `entry MCAP ${fmtMcap(res.entryMcap)} · range tick ${res.tickLower}..${res.tickUpper}`,
       res.swapHash ? `swap: <a href="${explorerTx(res.swapHash)}">tx</a> · ` : "" + `mint: <a href="${explorerTx(res.txHash)}">tx</a>`,
-      `<i>Cek /list · tutup manual kapan aja</i>`,
+      `<i>Check /list · close manually anytime</i>`,
     ].join("\n"),
   );
 }
@@ -122,12 +122,12 @@ export async function notifyOutOfRange(a: OutOfRangeAlert): Promise<void> {
   const head = a.autoClosed
     ? `🚪 <b>OUT OF RANGE → AUTO-CLOSED</b>`
     : a.closeError
-      ? `⚠️ <b>OUT OF RANGE — auto-close GAGAL</b>`
+      ? `⚠️ <b>OUT OF RANGE — auto-close FAILED</b>`
       : `🔴 <b>OUT OF RANGE</b>`;
   await send(
     [
       `${head} · ${tokenEmoji(a.symbol)} <b>${esc(a.symbol)}</b> #${a.tokenId}`,
-      `Harga nembus ke <b>${a.side}</b> range — posisi berhenti makan fee.`,
+      `Price broke out of <b>${a.side}</b> range — position stopped earning fees.`,
       `tick ${a.tick} · range ${a.tickLower}..${a.tickUpper}`,
       a.closeError ? `❌ ${esc(a.closeError)}` : "",
     ]

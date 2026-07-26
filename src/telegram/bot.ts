@@ -136,7 +136,7 @@ export function stop(): void {
 
 export async function run(): Promise<void> {
   await registerCommands();
-  log.info(`Robinhood LP Bot v2 jalan — chain ${cfg.chainId}, wallet ${wallet().address}`);
+  log.info(`Robinhood LP Bot v2 running — chain ${cfg.chainId}, wallet ${wallet().address}`);
   startWatch();
   void startFeed(); // no-op unless cfg.feed.enabled
   let offset = 0;

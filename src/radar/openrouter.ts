@@ -16,43 +16,63 @@ export interface LlmVerdict {
 
 export async function llmScore(system: string, user: string): Promise<LlmVerdict | null> {
   if (!env.openrouterKey) return null;
-  const body = JSON.stringify({
-    model: env.openrouterModel,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-    response_format: { type: "json_object" },
-    stream: false, // some gateways stream by default; we want one JSON body
-    temperature: 0.2,
-    max_tokens: 1200,
-  });
-  // Free models throttle upstream (HTTP 429 with Retry-After) — retry once, briefly.
-  for (let attempt = 0; attempt < 2; attempt++) {
+
+  // Pool of free models to rotate through in case of rate limits or model failures
+  const models = [
+    env.openrouterModel,
+    "nvidia/nemotron-4-340b-instruct:free",
+    "meta-llama/llama-3-8b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "microsoft/phi-3-medium-128k-instruct:free"
+  ].filter((v, i, a) => v && a.indexOf(v) === i); // deduplicate
+
+  for (const model of models) {
+    const body = JSON.stringify({
+      model: model,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      response_format: { type: "json_object" },
+      stream: false, // some gateways stream by default; we want one JSON body
+      temperature: 0.2,
+      max_tokens: 1200,
+    });
+
+    log.info(`Trying LLM screening with model: ${model}`);
+
     try {
       const res = await fetch(env.openrouterUrl, {
         method: "POST",
-        headers: { Authorization: `Bearer ${env.openrouterKey}`, "Content-Type": "application/json", "X-Title": "Robinhood LP Bot" },
+        headers: { 
+          Authorization: `Bearer ${env.openrouterKey}`, 
+          "Content-Type": "application/json", 
+          "X-Title": "Robinhood LP Bot" 
+        },
         body,
         signal: AbortSignal.timeout(40_000),
       });
-      if (res.status === 429 && attempt === 0) {
-        const wait = Math.min(8000, (Number(res.headers.get("retry-after")) || 5) * 1000);
-        log.warn(`openrouter 429 (free throttle) — retry in ${wait}ms`);
-        await new Promise((r) => setTimeout(r, wait));
+
+      if (res.status === 429) {
+        log.warn(`model ${model} rate limited (429) — trying next fallback model`);
         continue;
       }
       if (!res.ok) {
-        log.warn(`openrouter HTTP ${res.status}`);
-        return null;
+        log.warn(`model ${model} returned HTTP ${res.status} — trying next fallback model`);
+        continue;
       }
+
       const j: any = await res.json();
       const msg = j?.choices?.[0]?.message ?? {};
-      // reasoning models sometimes leave content null and put the answer in `reasoning`
-      return parseVerdict(msg.content || msg.reasoning || "");
+      const verdict = parseVerdict(msg.content || msg.reasoning || "");
+      if (verdict) {
+        log.info(`LLM screening succeeded with model: ${model}`);
+        return verdict;
+      }
     } catch (e) {
-      log.warn(`openrouter gagal: ${(e as Error).message}`);
-      return null;
+      log.warn(`model ${model} call failed: ${(e as Error).message} — trying next fallback model`);
     }
   }
   return null;

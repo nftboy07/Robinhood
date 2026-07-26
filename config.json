@@ -47,23 +47,23 @@
     "maxTokens": 300
   },
   "feed": {
-    "enabled": false,
+    "enabled": true,
     "newToken": true,
     "positionMonitor": true,
-    "autoCloseOutOfRange": false,
+    "autoCloseOutOfRange": true,
     "newTokenMinWethSeed": 0.02,
     "activityThreshold": 3,
     "cooldownMin": 30
   },
   "radar": {
-    "enabled": false,
+    "enabled": true,
     "useGmgn": true,
     "attachToNewToken": true,
     "attachToWatch": true
   },
   "autoLp": {
-    "enabled": false,
-    "sizeEth": 0.001,
+    "enabled": true,
+    "sizeEth": 0.01,
     "mode": "single",
     "minScore": 75,
     "requireAction": "ape",
@@ -74,6 +74,9 @@
     "maxOpen": 3,
     "maxPerHour": 2,
     "dailyCapEth": 0.01,
-    "sources": ["watch-spike"]
+    "sources": [
+      "watch-spike",
+      "feed-new"
+    ]
   }
 }

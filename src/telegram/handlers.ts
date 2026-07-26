@@ -49,7 +49,7 @@ const usableEth = (b: { weth: string; eth: string }): number =>
 // ══════════ open flow ══════════
 
 export async function onCA(addr: string): Promise<void> {
-  await send(`🔎 <b>Cari pool v2 + v3 + v4</b> di Robinhood Chain\n<code>${addr}</code>`);
+  await send(`🔎 <b>Search pool v2 + v3 + v4</b> di Robinhood Chain\n<code>${addr}</code>`);
   let meta: TokenMeta;
   const pools: UPool[] = [];
   try {
@@ -67,11 +67,11 @@ export async function onCA(addr: string): Promise<void> {
     for (const p of v4) if (p.liquidity > 0n) pools.push({ version: "v4", fee: p.fee, liqLabel: "ETH ✅", v4: p });
     for (const p of v4usd) if (p.liquidity > 0n) pools.push({ version: "v4", fee: p.fee, liqLabel: "USDG ✅", v4: p });
   } catch (e) {
-    await send(`❌ Gagal baca token/pool: ${short(e, 80)}`);
+    await send(`❌ Failed to read token/pool: ${short(e, 80)}`);
     return;
   }
   if (!pools.length) {
-    await send(`⚠️ Tidak ada pool ${esc(meta.symbol)} (v2/v3 WETH, v4 ETH/USDG) dengan likuiditas. Belum bisa LP.`);
+    await send(`⚠️ No pools found for ${esc(meta.symbol)} (v2/v3 WETH, v4 ETH/USDG) with liquidity. Cannot LP yet.`);
     return;
   }
   // sort: highest fee first (memecoin farming preference); on ties v4 > v3 > v2
@@ -87,7 +87,7 @@ export async function onCA(addr: string): Promise<void> {
   const nV2 = pools.filter((p) => p.version === "v2").length;
   const nV3 = pools.filter((p) => p.version === "v3").length;
   const nV4 = pools.filter((p) => p.version === "v4").length;
-  await send(`Ketemu <b>${pools.length}</b> pool ${esc(meta.symbol)} (${nV2} v2 + ${nV3} v3 + ${nV4} v4). Pilih:`, {
+  await send(`Found <b>${pools.length}</b> pools ${esc(meta.symbol)} (${nV2} v2 + ${nV3} v3 + ${nV4} v4). Choose:`, {
     reply_markup: { inline_keyboard: rows },
   });
 }
@@ -121,24 +121,24 @@ export async function onPick(idx: number, mid: number): Promise<void> {
 
   const reuseLine =
     tokUi > 0 && (p.version === "v4" || p.version === "v2")
-      ? `♻️ <b>${tokUi.toPrecision(4)} ${esc(pending.meta.symbol)}</b> udah di wallet — bakal <b>dipake ulang</b> (nggak beli lagi).`
+      ? `♻️ <b>${tokUi.toPrecision(4)} ${esc(pending.meta.symbol)}</b> already in wallet — will be <b>reused</b> (no re-buy).`
       : "";
-  const balLine = balanced > 0 ? `⚖️ Buat <b>dual-side seimbang</b> sama token itu: pasang <b>~${balanced.toFixed(5)} ETH</b>.` : "";
+  const balLine = balanced > 0 ? `⚖️ For a <b>balanced dual-side</b> mint: use <b>~${balanced.toFixed(5)} ETH</b>.` : "";
   const extra =
     balanced > 0
-      ? { reply_markup: { inline_keyboard: [[{ text: `⚖️ Dual-side seimbang (~${balanced.toFixed(4)} Ξ)`, callback_data: "ballp" }]] } }
+      ? { reply_markup: { inline_keyboard: [[{ text: `⚖️ Balanced dual-side (~${balanced.toFixed(4)} Ξ)`, callback_data: "ballp" }]] } }
       : {};
   await edit(
     mid,
     [
-      `<b>${esc(pending.meta.symbol)}</b> · <b>${p.version.toUpperCase()}</b> fee ${(p.fee / 10000).toFixed(2)}% dipilih.`,
+      `<b>${esc(pending.meta.symbol)}</b> · <b>${p.version.toUpperCase()}</b> fee ${(p.fee / 10000).toFixed(2)}% selected.`,
       b
-        ? `Saldo bisa di-LP: <b>${usableEth(b).toFixed(5)} ETH</b>  <i>(WETH ${Number(b.weth).toFixed(4)} + ETH ${Number(b.eth).toFixed(4)})</i>`
+        ? `Available to LP: <b>${usableEth(b).toFixed(5)} ETH</b>  <i>(WETH ${Number(b.weth).toFixed(4)} + ETH ${Number(b.eth).toFixed(4)})</i>`
         : "",
       reuseLine,
       balLine,
       ``,
-      `💬 <b>Ketik jumlah ETH</b> yang mau di-LP (contoh: <code>0.005</code>)${balanced > 0 ? " — atau tap tombol di bawah." : ""}`,
+      `💬 <b>Type the ETH amount</b> you want to LP (example: <code>0.005</code>)${balanced > 0 ? " — or tap the button below." : ""}`,
     ]
       .filter(Boolean)
       .join("\n"),
@@ -158,13 +158,13 @@ export async function onAmount(text: string): Promise<void> {
   if (!pending?.awaitingAmount || !pending.chosen) return;
   const eth = parseFloat(text);
   if (!(eth > 0)) {
-    await send("Masukin angka ETH yang bener, contoh: 0.005");
+    await send("Enter a valid ETH amount, example: 0.005");
     return;
   }
   const b = await balances().catch(() => null);
   if (b && eth > usableEth(b) + 1e-9) {
     await send(
-      `⚠️ Kegedean. Yang bisa di-LP cuma ${usableEth(b).toFixed(5)} ETH (WETH ${Number(b.weth).toFixed(4)} + ETH ${Number(b.eth).toFixed(4)}, sisain gas). Ketik lebih kecil.`,
+      `⚠️ Too large. Max available to LP is ${usableEth(b).toFixed(5)} ETH (WETH ${Number(b.weth).toFixed(4)} + ETH ${Number(b.eth).toFixed(4)}, keeping gas reserve). Enter a smaller amount.`,
     );
     return;
   }
@@ -184,7 +184,7 @@ export async function onAmount(text: string): Promise<void> {
         `<b>Konfirmasi LP · Uniswap v2</b>`,
         `${esc(pending.meta.symbol)} · fee <b>0.30%</b> · deposit <b>${eth} ETH</b> · full-range`,
         ``,
-        `🎯 v2 selalu <b>both-sided 50/50</b>: bot swap ~separuh ETH → ${esc(pending.meta.symbol)}, sisanya jadi pasangan LP. <b>Fee jalan LANGSUNG.</b>`,
+        `🎯 v2 selalu <b>both-sided 50/50</b>: bot swap ~separuh ETH → ${esc(pending.meta.symbol)}, sisanya jadi pasangan LP. <b>Fees start IMMEDIATELY.</b>`,
         `⚠️ Langsung pegang token (rug = rugi ~separuh). Nggak ada single-side di v2.`,
       ].join("\n"),
       {
@@ -210,7 +210,7 @@ export async function onAmount(text: string): Promise<void> {
           `<b>Konfirmasi LP · Uniswap v4 · USDG</b> 🦄`,
           `${esc(pending.meta.symbol)}/USDG · fee <b>${feePct}%</b> · deposit <b>${eth} ETH</b>`,
           ``,
-          `🎯 <b>In-range (farming)</b> — bot beli USDG + ${esc(pending.meta.symbol)} dari ETH lo (rute terbaik via Kyber), terus mint both-sided. <b>Fee ${feePct}% jalan LANGSUNG.</b>`,
+          `🎯 <b>In-range (farming)</b> — bot beli USDG + ${esc(pending.meta.symbol)} dari ETH lo (rute terbaik via Kyber), terus mint both-sided. <b>Fee ${feePct}% start IMMEDIATELY.</b>`,
           `⚠️ Langsung pegang token (rug = rugi). Nggak ada single-side di pair USDG.`,
         ].join("\n"),
         {
@@ -229,7 +229,7 @@ export async function onAmount(text: string): Promise<void> {
         `<b>Konfirmasi mint · Uniswap v4</b> 🦄`,
         `${esc(pending.meta.symbol)} · fee <b>${feePct}%</b> · deposit <b>${eth} ETH</b> · pair native ETH`,
         ``,
-        `🎯 <b>In-range (farming)</b> — beli token via rute terbaik (Kyber), mint di sekitar harga. <b>Fee ${feePct}% jalan LANGSUNG.</b> Tapi langsung pegang token (rug = rugi ~separuh).`,
+        `🎯 <b>In-range (farming)</b> — beli token via rute terbaik (Kyber), mint di sekitar harga. <b>Fee ${feePct}% start IMMEDIATELY.</b> Tapi langsung pegang token (rug = rugi ~separuh).`,
         ``,
         `🛡 <b>Single-side ETH</b> — parkir ETH, range di atas harga. Fee cuma pas harga NAIK masuk range. Aman dari rug.`,
       ].join("\n"),
@@ -260,7 +260,7 @@ export async function onAmount(text: string): Promise<void> {
       pS ? `📊 MCAP now: <b>${fmtMcap(pS.mcapNow)}</b>` : "",
       ``,
       `🛡 <b>Single-side ETH</b> — range ${rng(pS)}`,
-      `   0% token. Fee jalan cuma kalau MCAP masuk range. Aman dari rug.`,
+      `   0% token. Fees start only kalau MCAP masuk range. Aman dari rug.`,
       ``,
       `🎯 <b>In-range</b> — range ${rng(pI)}`,
       `   swap ~<b>${pI?.swapPct ?? "?"}%</b> modal → ${esc(pending.meta.symbol)} duluan. Fee LANGSUNG jalan,`,
@@ -310,7 +310,7 @@ export async function onMint(mid: number, action = "single"): Promise<void> {
         .join("\n"),
     );
   } catch (e) {
-    await send(`❌ Mint gagal: ${short(e, 160)}`);
+    await send(`❌ Mint failed: ${short(e, 160)}`);
   }
 }
 
@@ -344,7 +344,7 @@ async function onMintV4(mid: number, mode: "single" | "inrange"): Promise<void> 
         .join("\n"),
     );
   } catch (e) {
-    await send(`❌ v4 mint gagal: ${short(e, 160)}`);
+    await send(`❌ v4 mint failed: ${short(e, 160)}`);
   }
 }
 
@@ -369,7 +369,7 @@ async function onMintV2(mid: number): Promise<void> {
         .join("\n"),
     );
   } catch (e) {
-    await send(`❌ v2 LP gagal: ${short(e, 160)}`);
+    await send(`❌ v2 LP failed: ${short(e, 160)}`);
   }
 }
 
@@ -391,13 +391,13 @@ export async function onList(mid: number | null = null, force = false): Promise<
     return;
   }
   if (!mid) {
-    const m = await send("⏳ Memuat posisi…");
+    const m = await send("⏳ Loading positions…");
     mid = m?.result?.message_id ?? null;
   }
   const out = (txt: string, extra?: Record<string, unknown>) => (mid ? edit(mid, txt, extra) : send(txt, extra));
   const { listV4Positions } = await import("../chain/v4/list.js");
   const { listV2Positions } = await import("../chain/v2/list.js");
-  // v2 + v3 + v4 in parallel (was sequential → slow "Memuat posisi…")
+  // v2 + v3 + v4 in parallel (was sequential → slow "Loading positions…")
   const [rowsRes, v4rows, v2rows] = await Promise.all([
     listPositions().then((r) => ({ ok: true as const, r })).catch((e) => ({ ok: false as const, e })),
     listV4Positions().catch(() => []),
@@ -564,11 +564,11 @@ export async function onLedger(page = 0, mid: number | null = null): Promise<voi
     try {
       await backfillLedger();
     } catch (e) {
-      await out(`❌ Rebuild gagal: ${short(e, 90)}`);
+      await out(`❌ Rebuild failed: ${short(e, 90)}`);
       return;
     }
     if (!readLedger().length) {
-      await out("📒 Belum ada posisi LP yang pernah ditutup.\n<i>Keisi otomatis tiap lu close posisi.</i>");
+      await out("📒 No LP positions have been closed yet.\n<i>Fills automatically every time you close a position.</i>");
       return;
     }
     return onLedger(page, mid);
@@ -673,7 +673,7 @@ export async function onLedgerRebuild(mid: number): Promise<void> {
     await edit(mid, `✅ Rebuild selesai — v3: ${r.rebuilt} · v4: ${r4.rebuilt} direkonstruksi dari on-chain.`);
     await onLedger(0);
   } catch (e) {
-    await edit(mid, `❌ Rebuild gagal: ${short(e, 100)}`);
+    await edit(mid, `❌ Rebuild failed: ${short(e, 100)}`);
   }
 }
 
@@ -718,7 +718,7 @@ export async function onScreen(arg?: string): Promise<void> {
     btns.push([{ text: "🔄 Refresh", callback_data: "screen" }]);
     await edit(mid, head + "\n" + pre(T.join("\n")), { reply_markup: { inline_keyboard: btns } });
   } catch (e) {
-    await edit(mid, `❌ Screen gagal: ${short(e, 120)}`);
+    await edit(mid, `❌ Screen failed: ${short(e, 120)}`);
   }
 }
 
@@ -738,7 +738,7 @@ export async function onScan(): Promise<void> {
     await edit(mid, `🔍 <b>${hits.length} token</b> lolos:`);
     for (const h of hits) await handleSpike(h);
   } catch (e) {
-    await edit(mid, `❌ Scan gagal: ${short(e, 90)}`);
+    await edit(mid, `❌ Scan failed: ${short(e, 90)}`);
   }
 }
 
@@ -762,7 +762,7 @@ export async function onWatch(arg?: string): Promise<void> {
   }
   const T = [
     `${padR("status", 12)} ${isWatchOn() ? "ON" : "OFF"}`,
-    `${padR("scan tiap", 12)} ${w.intervalSec}s`,
+    `${padR("scan every", 12)} ${w.intervalSec}s`,
     `${padR("vol 5m min", 12)} $${(w.minVol5m / 1000).toFixed(0)}k`,
     `${padR("naik min", 12)} ${w.riseFactor}× vs scan sebelumnya`,
     `${padR("vol 1h min", 12)} $${(w.minVol1h / 1000).toFixed(0)}k`,
@@ -794,7 +794,7 @@ export async function onFeed(arg?: string): Promise<void> {
     cfg.feed.enabled = true;
     persist();
     await startFeed();
-    await send("📡 Feed monitor <b>ON</b> — deteksi token baru + posisi out-of-range real-time.");
+    await send("📡 Feed monitor <b>ON</b> — real-time detection of new tokens + out-of-range positions.");
     return;
   }
   if (arg === "off") {
@@ -820,7 +820,7 @@ export async function onFeed(arg?: string): Promise<void> {
     `${padR("fast-submit", 16)} ${env.fastSubmit ? "ON → sequencer" : "off (via RPC)"}`,
     ``,
     `${padR("token dikenal", 16)} ${s.seen}`,
-    `${padR("posisi dipantau", 16)} ${s.positions}`,
+    `${padR("positions monitored", 16)} ${s.positions}`,
     `${padR("token baru", 16)} ${s.newTokens}`,
     `${padR("alert range", 16)} ${s.rangeAlerts}`,
   ];
@@ -870,7 +870,7 @@ export async function onV4(ca?: string): Promise<void> {
 export async function onV4Lp(text: string): Promise<void> {
   const [, ca, ethStr] = text.split(/\s+/);
   if (!ca || !/^0x[a-fA-F0-9]{40}$/.test(ca) || !ethStr || !(parseFloat(ethStr) > 0)) {
-    await send("Format: <code>/v4lp 0x… 0.001</code> — buka LP v4 single-side ETH di pool fee-tertinggi.");
+    await send("Format: <code>/v4lp 0x… 0.001</code> — open LP v4 single-side ETH in the highest fee pool.");
     return;
   }
   const eth = parseFloat(ethStr);
@@ -895,7 +895,7 @@ export async function onV4Lp(text: string): Promise<void> {
       ].join("\n"),
     );
   } catch (e) {
-    await edit(mid, `❌ v4 mint gagal: ${short(e, 160)}`);
+    await edit(mid, `❌ v4 mint failed: ${short(e, 160)}`);
   }
 }
 
@@ -917,7 +917,7 @@ export async function onV4Close(text: string): Promise<void> {
         `✅ <b>v4 #${tokenId} closed</b> · pool fee ${(r.fee / 10000).toFixed(2)}%`,
         `Balik: ${r.recv0 > 0 ? `${r.recv0.toFixed(6)} ${r.sym0}` : ""}${r.recv0 > 0 && r.recv1 > 0 ? " + " : ""}${r.recv1 > 0 ? `${r.recv1.toFixed(6)} ${r.sym1}` : ""}`,
         r.feeEth > 0 ? `🧲 fee earned: <b>${r.feeEth.toFixed(6)}Ξ</b>` : "",
-        r.forfeited ? `⚠️ <b>${esc(r.forfeited)}</b> nggak bisa ditarik (honeypot/rug) — direlakan, ETH diselamatkan.` : "",
+        r.forfeited ? `⚠️ <b>${esc(r.forfeited)}</b> cannot be withdrawn (honeypot/rug) — forfeited, ETH saved.` : "",
         `tx: <a href="${explorerTx(r.txHash)}">tx</a>`,
       ]
         .filter(Boolean)
@@ -926,7 +926,7 @@ export async function onV4Close(text: string): Promise<void> {
     const v4quote = /usdg|usd/i.test(r.pair) && !/\beth\b|weth/i.test(r.pair) ? ("usd" as const) : ("eth" as const);
     await sendCloseCard({ name: r.pair, version: "v4", quote: v4quote, depEth: r.depEth, outEth: r.outEth, feeEth: r.feeEth, pnlEth: r.pnlEth, pnlPct: r.pnlPct });
   } catch (e) {
-    await edit(mid, `❌ v4 close gagal: ${short(e, 160)}`);
+    await edit(mid, `❌ v4 close failed: ${short(e, 160)}`);
   }
 }
 
@@ -946,7 +946,7 @@ export async function onV4Collect(tokenId: string): Promise<void> {
       ].join("\n"),
     );
   } catch (e) {
-    await edit(mid, `❌ Claim fee gagal: ${short(e, 160)}`);
+    await edit(mid, `❌ Claim fee failed: ${short(e, 160)}`);
   }
 }
 
@@ -974,7 +974,7 @@ export async function onV2Close(pair: string): Promise<void> {
     );
     await sendCloseCard({ name: `${r.sym}/WETH`, version: "v2", depEth: r.depEth, outEth: r.recvEth, pnlEth: r.pnlEth });
   } catch (e) {
-    await edit(mid, `❌ v2 close gagal: ${short(e, 160)}`);
+    await edit(mid, `❌ v2 close failed: ${short(e, 160)}`);
   }
 }
 
@@ -988,7 +988,7 @@ export async function onAuto(arg?: string): Promise<void> {
     await send(
       [
         `🤖 <b>AUTO-LP ON</b> ⚠️`,
-        `Bot bakal buka posisi OTOMATIS (pakai dana beneran) kalau kandidat lolos radar + semua gate.`,
+        `Bot will open positions AUTOMATICALLY (using real funds) if candidate passes radar + all gates.`,
         ``,
         `Gate sekarang:`,
         `• source: ${a.sources.join(", ")}`,
@@ -1016,7 +1016,7 @@ export async function onAuto(arg?: string): Promise<void> {
     `${padR("source", 14)} ${a.sources.join(", ")}`,
     `${padR("likuid min", 14)} $${a.minLiqUsd}`,
     `${padR("tax maks", 14)} ${a.maxTaxPct}%`,
-    `${padR("cap posisi", 14)} ${a.maxOpen}`,
+    `${padR("position cap", 14)} ${a.maxOpen}`,
     `${padR("cap /jam", 14)} ${a.maxPerHour}`,
     `${padR("cap /hari", 14)} ${a.dailyCapEth}Ξ`,
     ``,
@@ -1063,7 +1063,7 @@ export async function onClose(tokenId: string, mid: number, swapToken = true): P
           ? `🔄 Swap ${r.tokenSym} → +${r.swappedWeth.toFixed(6)} WETH`
           : r.tokenStuck > 0
             ? swapToken
-              ? `⚠️ ${r.tokenStuck.toFixed(2)} ${r.tokenSym} gagal dijual (rug) — nyangkut`
+              ? `⚠️ ${r.tokenStuck.toFixed(2)} ${r.tokenSym} failed to sell (rug) — stuck`
               : `🪙 ${r.tokenStuck.toFixed(2)} ${r.tokenSym} disimpen (senilai ~$${px ? ((r.valEth - r.recvWeth) * px).toFixed(2) : "?"})`
             : "",
         `Total balik: <b>${r.valEth.toFixed(6)}Ξ / $${px ? (r.valEth * px).toFixed(2) : "?"}</b>${r.depEth != null ? ` (deposit ${r.depEth.toFixed(6)}Ξ)` : ""}${pnl}`,
@@ -1075,7 +1075,7 @@ export async function onClose(tokenId: string, mid: number, swapToken = true): P
     );
     await sendCloseCard({ name: `${r.tokenSym}/WETH`, version: "v3", depEth: r.depEth, outEth: r.valEth, pnlEth: r.pnlEth, pnlPct: r.pnlPct, heldMs: r.heldMs });
   } catch (e) {
-    await send(`❌ Close gagal: ${short(e, 120)}`);
+    await send(`❌ Close failed: ${short(e, 120)}`);
   }
 }
 
@@ -1089,11 +1089,11 @@ export async function onCloseAll(): Promise<void> {
     return;
   }
   if (!rows.length) {
-    await send("Tidak ada posisi buat ditutup.");
+    await send("No positions to close.");
     return;
   }
   const px = await ethUsd().catch(() => 0);
-  await send(`🗑🗑 <b>Menutup ${rows.length} posisi…</b> (satu per satu)`);
+  await send(`🗑🗑 <b>Closing ${rows.length} positions…</b> (satu per satu)`);
   let totPnl = 0, ok = 0, fail = 0;
   for (const row of rows) {
     try {
@@ -1105,12 +1105,12 @@ export async function onCloseAll(): Promise<void> {
       );
     } catch (e) {
       fail++;
-      await send(`❌ #${row.tokenId} gagal: ${short(e, 70)}`);
+      await send(`❌ #${row.tokenId} failed: ${short(e, 70)}`);
     }
   }
   await send(
     [
-      `🏁 <b>Close ALL selesai</b> — ${ok} sukses${fail ? `, ${fail} gagal` : ""}`,
+      `🏁 <b>Close ALL finished</b> — ${ok} success${fail ? `, ${fail} gagal` : ""}`,
       `💰 Total PnL ETH: <b>${totPnl >= 0 ? "+" : ""}${totPnl.toFixed(6)}Ξ</b>`,
       px ? `💵 Total PnL USD: <b>${totPnl >= 0 ? "+" : ""}$${(totPnl * px).toFixed(2)}</b>` : "",
     ]
@@ -1141,7 +1141,7 @@ export async function onSwap(text: string): Promise<void> {
         "• <code>/swap 100 0xCA eth</code> — token → ETH",
         "• <code>/swap 50 0xTokenA 0xTokenB</code> — token → token",
         "",
-        "<i>dari/ke: ketik <b>eth</b> atau alamat kontrak (0x… 40 hex)</i>",
+        "<i>from/to: type <b>eth</b> or contract address (0x… 40 hex)</i>",
       ].join("\n"),
     );
     return;
@@ -1170,7 +1170,7 @@ export async function onSwap(text: string): Promise<void> {
   try {
     amountIn = ethers.parseUnits(amtStr, fromMeta.decimals);
   } catch {
-    await send("Format jumlah salah.");
+    await send("Invalid amount format.");
     return;
   }
 
@@ -1204,15 +1204,15 @@ export async function onSwapDo(mid: number): Promise<void> {
     const { kyberSwap } = await import("../chain/kyber.js");
     const r = await kyberSwap(s.fromAddr, s.toAddr, s.amountIn);
     if (!r || r.amountOut <= 0n) {
-      await edit(mid, "❌ Swap gagal / output 0.");
+      await edit(mid, "❌ Swap failed / output 0.");
       return;
     }
     await edit(
       mid,
-      `✅ <b>Swap sukses</b> → +${Number(ethers.formatUnits(r.amountOut, s.toDec)).toPrecision(6)} ${esc(s.toSym)}\ntx: <a href="${explorerTx(r.tx)}">tx</a>`,
+      `✅ <b>Swap success</b> → +${Number(ethers.formatUnits(r.amountOut, s.toDec)).toPrecision(6)} ${esc(s.toSym)}\ntx: <a href="${explorerTx(r.tx)}">tx</a>`,
     );
   } catch (e) {
-    await edit(mid, `❌ Swap gagal: ${short(e, 150)}`);
+    await edit(mid, `❌ Swap failed: ${short(e, 150)}`);
   }
 }
 
@@ -1260,7 +1260,7 @@ export async function onCardFor(tokenId: string): Promise<void> {
     await send("❌ Posisi nggak ketemu di ledger.");
     return;
   }
-  const m = await send("📸 Bikin kartu posisi…");
+  const m = await send("📸 Creating position card…");
   const mid = m?.result?.message_id;
   try {
     const { renderCard, closeCardData } = await import("./card.js");
@@ -1357,7 +1357,7 @@ export async function onSell(): Promise<void> {
     });
     await sendMenu(
       [
-        `🏁 <b>Selesai jual</b> — ${r.sold} token → ETH${r.skipped ? `, ${r.skipped} di-skip (rug)` : ""}`,
+        `🏁 <b>Finished selling</b> — ${r.sold} token → ETH${r.skipped ? `, ${r.skipped} skipped (rug` : ""}`,
         `💰 Total dapet: <b>+${r.soldEth.toFixed(6)} WETH ($${r.soldUsd.toFixed(2)})</b>`,
       ].join("\n"),
     );
@@ -1486,10 +1486,10 @@ export async function onSet(text: string): Promise<void> {
 export async function onHelp(): Promise<void> {
   const body = [
     `🤖 <b>Robinhood LP Bot</b>  <i>v2 · Uniswap v2+v3+v4</i>`,
-    `Paste <b>CA token</b> (0x…) → pilih pool (v2/v3/v4) → jumlah ETH → LP.`,
+    `Paste <b>token CA</b> (0x…) → pilih pool (v2/v3/v4) → jumlah ETH → LP.`,
     ``,
     `<b>━━━ 📊 POSISI ━━━</b>`,
-    `📋 /list — posisi terbuka + PnL + close`,
+    `📋 /list — open positions + PnL + close`,
     `📒 /ledger — riwayat ditutup (realized)`,
     `💰 /pnl — PnL seumur hidup`,
     `📸 /card — kartu profit shareable`,
@@ -1499,7 +1499,7 @@ export async function onHelp(): Promise<void> {
     `📡 /feed — monitor sequencer real-time`,
     `👁 /watch — scanner volume nanjak`,
     `🔍 /scan — cek volume sekarang`,
-    `🤖 /auto — auto-LP (radar → buka sendiri)`,
+    `🤖 /auto — auto-LP (radar → opens itself)`,
     `🦄 /v4 <code>&lt;ca&gt;</code> — cek pool v4 fee-tinggi`,
     ``,
     `<b>━━━ ⚡ AKSI ━━━</b>`,

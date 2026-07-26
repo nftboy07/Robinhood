@@ -125,8 +125,9 @@ export function mcapAtTick(st: PoolState, tick: number, ethUsd: number, supplyUi
 }
 
 /** Width of the range in ticks, from widthPct, snapped to the pool's spacing. */
-export function widthInTicks(spacing: number): number {
-  const raw = Math.log(1 + cfg.lp.widthPct / 100) / LN_10001;
+export function widthInTicks(spacing: number, customWidthPct?: number): number {
+  const pct = customWidthPct ?? cfg.lp.widthPct;
+  const raw = Math.log(1 + pct / 100) / LN_10001;
   return Math.max(spacing, Math.round(raw / spacing) * spacing);
 }
 
@@ -182,4 +183,13 @@ export function swapFractionForRange(st: PoolState, tickLower: number, tickUpper
   const fracToken1 = a1in0 / (a0 + a1in0);
   const f = st.wethIsToken0 ? fracToken1 : 1 - fracToken1;
   return Math.min(0.95, Math.max(0.02, f));
+}
+
+
+/** Compute dynamic width percentage based on price volatility (chg5m). */
+export function dynamicWidthPct(chg5m: number): number {
+  const absChg = Math.abs(chg5m);
+  if (absChg > 15) return 80; // High volatility: wide buffer (±80%)
+  if (absChg < 3) return 20;  // Low volatility / high volume: narrow range (±20%) for max fee yield
+  return 50;                  // Standard range
 }

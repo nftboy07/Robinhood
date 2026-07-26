@@ -132,9 +132,9 @@ export async function safetyCheck(tokenAddr: string, maxTaxPct = 6): Promise<Saf
       /* no pool / cannot sell this tier */
     }
   }
-  if (!best) return { ok: false, backPct: 0, taxPct: 100, reason: "TIDAK BISA DIJUAL (simulasi revert) — honeypot" };
-  if (best.taxPct > maxTaxPct) return { ...best, ok: false, reason: `tax tersembunyi ~${best.taxPct.toFixed(1)}%` };
-  return { ...best, ok: true, reason: `sehat (balik ${best.backPct.toFixed(1)}%)` };
+  if (!best) return { ok: false, backPct: 0, taxPct: 100, reason: "CANNOT SELL (simulation reverted) — honeypot" };
+  if (best.taxPct > maxTaxPct) return { ...best, ok: false, reason: `hidden tax ~${best.taxPct.toFixed(1)}%` };
+  return { ...best, ok: true, reason: `healthy (returned ${best.backPct.toFixed(1)}%)` };
 }
 
 // stablecoins have high volume but no momentum — filter by name AND behaviour
