@@ -1,8 +1,15 @@
+import { ethers } from "ethers";
+import { provider } from "../chain/client.js";
+import { ERC20_ABI } from "../chain/abis.js";
+import { maybeAutoLp } from "./autolp.js";
+import { send } from "../telegram/tg.js";
 import { logger } from "../util/log.js";
+import { dataPath, readJson, writeJson } from "../util/files.js";
 
 const log = logger("poke-ai");
 const POKE_API_KEY = process.env.POKE_API_KEY || "";
 const POKE_URL = process.env.POKE_API_URL || "https://poke.com/api/v1/inbound/api-message";
+const SEEN_CAS_FILE = dataPath("twitter-seen-cas.json");
 
 export const ROBINHOOD_ECOSYSTEM_ACCOUNTS = {
   mustWatch: [
@@ -31,18 +38,74 @@ const ALL_ACCOUNTS = [
   ...ROBINHOOD_ECOSYSTEM_ACCOUNTS.early
 ];
 
-export interface PokeAlert {
-  token: string;
-  symbol: string;
-  source: "twitter" | "launchpad" | "telegram";
-  rawMessage?: string;
+function loadSeenCas(): Record<string, number> {
+  return readJson<Record<string, number>>(SEEN_CAS_FILE, {});
+}
+
+function saveSeenCas(seen: Record<string, number>): void {
+  writeJson(SEEN_CAS_FILE, seen);
+}
+
+/** Extract EVM 0x contract addresses from text */
+export function extractCasFromText(text: string): string[] {
+  const matches = text.match(/0x[a-fA-F0-9]{40}/g) || [];
+  return Array.from(new Set(matches.map((a) => a.toLowerCase())));
+}
+
+/** Process a newly discovered CA from Twitter / Poke AI */
+export async function processTwitterCaCandidate(
+  rawCa: string,
+  author: string = "Twitter",
+  tweetSnippet: string = ""
+): Promise<boolean> {
+  const ca = rawCa.toLowerCase();
+  const seen = loadSeenCas();
+  if (seen[ca]) return false; // already evaluated
+
+  seen[ca] = Date.now();
+  saveSeenCas(seen);
+
+  try {
+    const code = await provider.getCode(ca);
+    if (!code || code === "0x") return false; // not a contract
+
+    const contract = new ethers.Contract(ca, ERC20_ABI, provider);
+    const symbol: string = await contract.symbol!().catch(() => "");
+    if (!symbol) return false; // not an ERC-20
+
+    log.info(`🐦 [TWITTER / POKE AI CA FOUND] ${symbol} (${ca}) from ${author}`);
+    await send(`🐦 <b>[TWITTER NEW CA DETECTED]</b>\n• Token: <b>$${symbol}</b>\n• CA: <code>${ca}</code>\n• Source: ${author}\n• Snippet: <i>${tweetSnippet.slice(0, 140)}</i>\n• Triggering automated position entry...`).catch(() => {});
+
+    // Execute direct position buy
+    const res = await maybeAutoLp(
+      {
+        token: ca,
+        symbol,
+        source: "poke-ai",
+        wethSeed: 0.05,
+        onchainBackPct: 100,
+      },
+      {
+        llm: { score: 88, action: "ape", summary: `High conviction official ecosystem launch by ${author}` },
+        gmgn: null,
+      }
+    );
+
+    if (res?.opened) {
+      log.info(`[Poke AI] Successfully took position in ${symbol} (${ca}) via Twitter alert!`);
+      return true;
+    }
+    return false;
+  } catch (e) {
+    log.warn(`[Poke AI] Error processing CA ${ca}: ${(e as Error).message}`);
+    return false;
+  }
 }
 
 /** Send instruction / alert to Poke AI subagents pool */
-export async function sendPokeMessage(message: string): Promise<boolean> {
+export async function sendPokeMessage(message: string): Promise<string> {
   if (!POKE_API_KEY) {
-    log.debug("POKE_API_KEY missing");
-    return false;
+    return "";
   }
   try {
     const res = await fetch(POKE_URL, {
@@ -54,35 +117,39 @@ export async function sendPokeMessage(message: string): Promise<boolean> {
       body: JSON.stringify({ message }),
     });
     if (res.ok) {
-      log.info(`[Poke AI] Dispatched scan instruction for ${ALL_ACCOUNTS.length} ecosystem accounts`);
-      return true;
-    } else {
-      log.warn(`[Poke AI] HTTP ${res.status}: ${await res.text()}`);
-      return false;
+      const respText = await res.text();
+      return respText;
     }
+    return "";
   } catch (e) {
     log.error(`[Poke AI] Error dispatching to subagents: ${(e as Error).message}`);
-    return false;
+    return "";
   }
 }
 
-/** Trigger Poke AI subagent swarm to scan official Robinhood Ecosystem accounts for token launches */
-export async function triggerPokeSubagentsScan(): Promise<void> {
-  const prompt = `Monitor live Twitter/X posts, token launches, and contract drops from key Robinhood Chain ecosystem accounts: ${ALL_ACCOUNTS.join(", ")}. Detect newly deployed Robinhood Chain CAs (0x...), token tickers, and liquidity pools. Forward contract addresses immediately.`;
-  await sendPokeMessage(prompt);
+/** Trigger Poke AI subagents to scan Twitter/X for new Robinhood meme posts and parse CAs */
+export async function scanTwitterRobinhoodMemes(): Promise<void> {
+  const prompt = `Search the latest Twitter/X posts from these 40 Robinhood Chain ecosystem accounts: ${ALL_ACCOUNTS.join(", ")}. Return any newly deployed contract addresses (0x...), token tickers, and launch announcements.`;
+  const responseText = await sendPokeMessage(prompt);
+
+  if (responseText) {
+    const cas = extractCasFromText(responseText);
+    for (const ca of cas) {
+      void processTwitterCaCandidate(ca, "Poke AI Subagent Twitter Monitor", responseText);
+    }
+  }
 }
 
 let pokeInterval: NodeJS.Timeout | null = null;
 
-/** Start automated background subagent polling loop */
+/** Start automated background subagent polling loop (every 60s) */
 export function startPokeSubagentWatcher(): void {
   if (pokeInterval) return;
-  log.info(`[Poke AI] Started subagent watcher for ${ALL_ACCOUNTS.length} Robinhood ecosystem accounts`);
-  void triggerPokeSubagentsScan();
-  // Poll every 3 minutes to keep subagent swarm active
+  log.info(`[Poke AI] Started Twitter & Subagent Watcher for ${ALL_ACCOUNTS.length} Robinhood ecosystem accounts (60s loop)`);
+  void scanTwitterRobinhoodMemes();
   pokeInterval = setInterval(() => {
-    void triggerPokeSubagentsScan();
-  }, 180_000);
+    void scanTwitterRobinhoodMemes();
+  }, 60_000);
 }
 
 export function stopPokeSubagentWatcher(): void {
