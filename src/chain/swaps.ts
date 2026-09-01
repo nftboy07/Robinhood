@@ -151,31 +151,34 @@ export async function swapWethToToken(
   wethRaw: bigint,
   fee: number,
 ): Promise<SwapResult> {
-  const w = wallet();
-  const wc = new ethers.Contract(C.weth, WETH_ABI, w);
-  if ((await wc.allowance!(w.address, C.swapRouter02)) < wethRaw) {
-    await (await wc.approve!(C.swapRouter02, ethers.MaxUint256, await overrides())).wait();
-  }
-  const quote = await quoteWethToToken(tokenAddr, wethRaw, fee);
-  const minOut = minOutWithSlippage(quote.amountOut);
-  const erc = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
-  const before: bigint = await erc.balanceOf!(w.address);
-  const router = new ethers.Contract(C.swapRouter02, ROUTER_ABI, w);
-  const tx = await router.exactInputSingle!(
-    {
-      tokenIn: C.weth,
-      tokenOut: tokenAddr,
-      fee,
-      recipient: w.address,
-      amountIn: wethRaw,
-      amountOutMinimum: minOut,
-      sqrtPriceLimitX96: 0n,
-    },
-    await overrides(),
-  );
-  await tx.wait();
-  const after: bigint = await erc.balanceOf!(w.address);
-  return { tx: tx.hash, amountOut: after - before };
+  return withTxLock(async (nonce) => {
+    const w = wallet();
+    const wc = new ethers.Contract(C.weth, WETH_ABI, w);
+    if ((await wc.allowance!(w.address, C.swapRouter02)) < wethRaw) {
+      await (await wc.approve!(C.swapRouter02, ethers.MaxUint256, { ...(await overrides()), nonce })).wait();
+    }
+    const quote = await quoteWethToToken(tokenAddr, wethRaw, fee);
+    const minOut = minOutWithSlippage(quote.amountOut);
+    const erc = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
+    const before: bigint = await erc.balanceOf!(w.address);
+    const router = new ethers.Contract(C.swapRouter02, ROUTER_ABI, w);
+    const txOverrides = { ...(await overrides()), nonce };
+    const tx = await router.exactInputSingle!(
+      {
+        tokenIn: C.weth,
+        tokenOut: tokenAddr,
+        fee: fee > 0 ? fee : 10000,
+        recipient: w.address,
+        amountIn: wethRaw,
+        amountOutMinimum: minOut,
+        sqrtPriceLimitX96: 0n,
+      },
+      txOverrides,
+    );
+    await tx.wait();
+    const after: bigint = await erc.balanceOf!(w.address);
+    return { tx: tx.hash, amountOut: after - before };
+  });
 }
 
 /** Pre-approve token for SwapRouter02 immediately upon purchase to enable 0ms instant exit */

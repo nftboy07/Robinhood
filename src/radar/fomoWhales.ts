@@ -21,7 +21,13 @@ export const FOMO_FAMILY_CONTRACTS = [
 ];
 
 function loadSeen(): Record<string, number> {
-  return readJson<Record<string, number>>(SEEN_FOMO_FILE, {});
+  const s = readJson<Record<string, number>>(SEEN_FOMO_FILE, {});
+  const now = Date.now();
+  const pruned: Record<string, number> = {};
+  for (const k of Object.keys(s)) {
+    if (now - s[k] < 7200_000) pruned[k] = s[k]; // 2h sliding window TTL
+  }
+  return pruned;
 }
 
 function saveSeen(s: Record<string, number>): void {
