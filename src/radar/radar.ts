@@ -14,7 +14,7 @@ const log = logger("radar");
 export interface Candidate {
   token: string;
   symbol: string;
-  source: "feed-new" | "watch-spike" | "manual-cmd" | "gmgn-trending" | "noxa-curve";
+  source: "feed-new" | "watch-spike" | "manual-cmd" | "gmgn-trending" | "noxa-curve" | "poke-ai";
   fee?: number;
   wethSeed?: number;
   onchainBackPct?: number; // our buy→sell round-trip sim (100 = clean)
