@@ -63,7 +63,7 @@
   },
   "autoLp": {
     "enabled": true,
-    "sizeEth": 0.001,
+    "sizeEth": 0.01,
     "mode": "buy",
     "minScore": 40,
     "requireAction": "watch",
@@ -73,7 +73,7 @@
     "maxTaxPct": 5,
     "maxOpen": 20,
     "maxPerHour": 15,
-    "dailyCapEth": 0.5,
+    "dailyCapEth": 1.0,
     "sources": [
       "watch-spike",
       "feed-new",

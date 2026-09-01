@@ -62,7 +62,7 @@ function calculateOrderSizeEth(candidate: Candidate, verdict?: Verdict | null): 
   }
 
   // 3. Standard Micro-Cap Snipe (Ground floor exploration)
-  return 0.001;
+  return 0.01;
 }
 
 export async function maybeAutoLp(
