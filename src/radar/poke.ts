@@ -24,20 +24,38 @@ export const CT_WATCHLIST = {
     "@JoinCtrlFi", "@robinscanio", "@hypdlaunch", "@gangswtf", "@xona_agent"
   ],
 
-  // 2. Top CT Meme Callers & Alpha Influencers
+  // 2. Robinhood Meme Callers, Degens & Community Alpha Channels
+  robinhoodMemeCallers: [
+    "@RobinhoodMemes", "@RobinhoodDegens", "@RobinhoodAlpha", "@RHMemeAlerts",
+    "@RobinhoodGems", "@RobinhoodDaily", "@RobinhoodHub", "@RHChainNews",
+    "@RHChainGems", "@RH_ApeClub", "@RobinhoodEcosystem", "@RobinhoodWhales",
+    "@RobinhoodCallers", "@RobinhoodDeFi", "@RobinhoodArmy", "@0xRobinhood",
+    "@RobinhoodRadar", "@AlphaCallerRH", "@RH_Sniper", "@RobinhoodCalls",
+    "@RobinhoodWhaleAlert", "@MemeGemsRH", "@RobinhoodGuru"
+  ],
+
+  // 3. Robinhood Native Launchpads & Bonding Curves
+  robinhoodLaunchpads: [
+    "@NoxaFun", "@FOMO_fund", "@ZeroHood_fun", "@O1_launch",
+    "@RobinPump", "@RobinhoodLaunch", "@RH_MemePad", "@HoodSwap",
+    "@RobinhoodDEX", "@SherwoodSwap"
+  ],
+
+  // 4. Top CT Meme Callers & Alpha Influencers
   topCtAlphas: [
     "@blknoiz06", "@theunipcs", "@MustStopMurad", "@ansem", "@Cobie",
     "@HsakaTrades", "@GCRClassic", "@cryptomanran", "@rektfencer", "@CrashiusClay69",
-    "@0xSunMarket", "@cryptunez", "@CentrifugeCrypto", "@Defi_Made_Here", "@ThorHartvigsen"
+    "@0xSunMarket", "@cryptunez", "@CentrifugeCrypto", "@Defi_Made_Here", "@ThorHartvigsen",
+    "@0xRamen", "@CryptoGorilla", "@MemeCoinGod", "@DegenSpartan", "@Tradermayne", "@SatoshiFlippa"
   ],
 
-  // 3. CT On-Chain Whale Trackers & Intelligence Feeds
+  // 5. CT On-Chain Whale Trackers & Intelligence Feeds
   whaleTrackers: [
     "@lookonchain", "@dexscreener", "@bubblemaps", "@gmgnai", "@DefiLlama",
     "@DuneAnalytics", "@whale_alert", "@ai_metadatabot", "@pepewhales", "@spotonchain"
   ],
 
-  // 4. Crypto AI Agents & Key Leaders
+  // 6. Crypto AI Agents & Key Leaders
   aiAndLeaders: [
     "@VladTenev", "@RobinhoodApp", "@VitalikButerin", "@HaydenZadler", "@shawmakesmagic",
     "@ai16zdao", "@truth_terminal", "@zerebro", "@clanker", "@pumpdotfun"
@@ -46,6 +64,8 @@ export const CT_WATCHLIST = {
 
 const ALL_ACCOUNTS = [
   ...CT_WATCHLIST.robinhoodEcosystem,
+  ...CT_WATCHLIST.robinhoodMemeCallers,
+  ...CT_WATCHLIST.robinhoodLaunchpads,
   ...CT_WATCHLIST.topCtAlphas,
   ...CT_WATCHLIST.whaleTrackers,
   ...CT_WATCHLIST.aiAndLeaders
@@ -68,7 +88,7 @@ export function extractCasFromText(text: string): string[] {
 /** Process a newly discovered CA from Twitter / CT / Poke AI */
 export async function processTwitterCaCandidate(
   rawCa: string,
-  author: string = "CT Alpha Account",
+  author: string = "Robinhood Meme Caller",
   tweetSnippet: string = ""
 ): Promise<boolean> {
   const ca = rawCa.toLowerCase();
@@ -86,8 +106,8 @@ export async function processTwitterCaCandidate(
     const symbol: string = await contract.symbol!().catch(() => "");
     if (!symbol) return false; // not an ERC-20
 
-    log.info(`🐦 [CT ALPHA / WHALE CA FOUND] ${symbol} (${ca}) from ${author}`);
-    await send(`🐦 <b>[CT WHALE / ALPHA CA DETECTED]</b>\n• Token: <b>$${symbol}</b>\n• CA: <code>${ca}</code>\n• Source: <b>${author}</b>\n• Post: <i>${tweetSnippet.slice(0, 140)}</i>\n• Triggering instant automated position entry...`).catch(() => {});
+    log.info(`🐦 [ROBINHOOD MEME CA FOUND] ${symbol} (${ca}) from ${author}`);
+    await send(`🐦 <b>[ROBINHOOD MEME CA DETECTED]</b>\n• Token: <b>$${symbol}</b>\n• CA: <code>${ca}</code>\n• Source: <b>${author}</b>\n• Post: <i>${tweetSnippet.slice(0, 140)}</i>\n• Triggering instant automated position entry...`).catch(() => {});
 
     // Execute direct position buy
     const res = await maybeAutoLp(
@@ -99,13 +119,13 @@ export async function processTwitterCaCandidate(
         onchainBackPct: 100,
       },
       {
-        llm: { score: 90, action: "ape", summary: `High conviction CT Alpha / Whale call by ${author}` },
+        llm: { score: 92, action: "ape", summary: `High conviction Robinhood meme call by ${author}` },
         gmgn: null,
       }
     );
 
     if (res?.opened) {
-      log.info(`[Poke AI] Successfully took position in ${symbol} (${ca}) via CT Whale alert!`);
+      log.info(`[Poke AI] Successfully took position in ${symbol} (${ca}) via Robinhood Meme alert!`);
       return true;
     }
     return false;
@@ -140,15 +160,15 @@ export async function sendPokeMessage(message: string): Promise<string> {
   }
 }
 
-/** Trigger Poke AI subagents to scan Twitter/X for all CT Big Accounts & Robinhood memes */
+/** Trigger Poke AI subagents to scan Twitter/X for all Robinhood meme accounts & new CAs */
 export async function scanTwitterRobinhoodMemes(): Promise<void> {
-  const prompt = `Search live Twitter/X posts from all top Crypto Twitter (CT) big accounts, whales, and Robinhood leaders (${ALL_ACCOUNTS.length} accounts including: ${ALL_ACCOUNTS.slice(0, 30).join(", ")}...). Find any newly announced Robinhood Chain contract addresses (0x...), meme tickers, and token drops.`;
+  const prompt = `Search live Twitter/X posts from all Robinhood meme mentioning accounts, callers, launchpads, and influencers (${ALL_ACCOUNTS.length} accounts including: ${ALL_ACCOUNTS.slice(0, 40).join(", ")}...). Find any newly announced Robinhood Chain contract addresses (0x...), meme tickers, and token drops.`;
   const responseText = await sendPokeMessage(prompt);
 
   if (responseText) {
     const cas = extractCasFromText(responseText);
     for (const ca of cas) {
-      void processTwitterCaCandidate(ca, "CT Big Account / Poke AI Subagent", responseText);
+      void processTwitterCaCandidate(ca, "Robinhood Meme Caller / Subagent", responseText);
     }
   }
 }
@@ -158,7 +178,7 @@ let pokeInterval: NodeJS.Timeout | null = null;
 /** Start automated background subagent polling loop (every 60s) */
 export function startPokeSubagentWatcher(): void {
   if (pokeInterval) return;
-  log.info(`[Poke AI] Started Subagent Watcher for ${ALL_ACCOUNTS.length} CT Big Accounts & Ecosystem Leaders (60s loop)`);
+  log.info(`[Poke AI] Started Subagent Watcher for ${ALL_ACCOUNTS.length} Robinhood Meme Accounts & Callers (60s loop)`);
   void scanTwitterRobinhoodMemes();
   pokeInterval = setInterval(() => {
     void scanTwitterRobinhoodMemes();
