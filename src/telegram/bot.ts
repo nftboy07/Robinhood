@@ -9,6 +9,7 @@ import { startCopyTrader } from "../radar/copyTrader.js";
 import { startCompounder } from "../radar/compounder.js";
 import { startLaunchpadScanner } from "../radar/launchpads.js";
 import { startFomoWhaleRadar } from "../radar/fomoWhales.js";
+import { startMoonbagEngine } from "../radar/moonbag.js";
 import { startFeed, stopFeed } from "./feedLoop.js";
 import { wallet } from "../chain/client.js";
 import { cfg } from "../config.js";
@@ -100,6 +101,7 @@ async function routeMessage(m: any): Promise<void> {
   if (t === "/closeall") return H.onCloseAll();
   if (t === "/wallet") return H.onWallet();
   if (t === "/rh" || t === "/chain") return H.onRhStats();
+  if (t === "/moonbags" || t === "/moonbag") return H.onMoonbags();
   if (t.startsWith("/social ") || t === "/social") return H.onSocialSentiment(t);
   if (t === "/settings") return H.onSettings();
   if (t.startsWith("/set ")) return H.onSet(t);
@@ -156,6 +158,7 @@ export async function run(): Promise<void> {
   startCompounder();
   startLaunchpadScanner();
   startFomoWhaleRadar();
+  startMoonbagEngine();
   void startFeed(); // no-op unless cfg.feed.enabled
   let offset = 0;
   while (running) {

@@ -1685,3 +1685,35 @@ export async function onSocialSentiment(cmd: string): Promise<void> {
 
   await send(msg);
 }
+
+export async function onMoonbags(): Promise<void> {
+  const { loadMoonbags } = await import("../radar/moonbag.js");
+  const bags = loadMoonbags();
+  const keys = Object.keys(bags);
+
+  if (keys.length === 0) {
+    return send(`🌌 <b>ACTIVE MOONBAGS (0)</b>\n\n<i>No active moonbags open yet. Once a position hits 2x-4x profit, 25% of tokens are automatically converted to a risk-free moonbag to ride 10x-100x pumps!</i>`);
+  }
+
+  let lines: string[] = [];
+  lines.push(`🌌 <b>ACTIVE RISK-FREE MOONBAGS (${keys.length} RUNNERS)</b>\n`);
+
+  for (const key of keys) {
+    const b = bags[key];
+    const rawBal = await tokenBalanceRaw(b.token);
+    const tokens = Number(ethers.formatEther(rawBal)) || 0;
+    const quote = await quoteTokenToWeth(b.token, rawBal).catch(() => ({ weth: 0, fee: 0, amountOut: 0n }));
+
+    lines.push(
+      `💎 <b>$${b.symbol}</b>\n` +
+      `  • Moonbag Held: <code>${tokens.toFixed(2)}</code> tokens\n` +
+      `  • Current Value: <b>${quote.weth.toFixed(4)}Ξ</b>\n` +
+      `  • Peak Multiplier: <b>${b.highestMultiplierHit.toFixed(1)}x</b>\n` +
+      `  • Locked Profit Floor: <b>${b.lockedProfitFloorMultiplier.toFixed(1)}x</b>\n` +
+      `  • Milestones Hit: ${b.milestonesHit.length ? b.milestonesHit.map(m => m + 'X 🚀').join(', ') : 'Riding to 5X'}\n` +
+      `  • Realized Profit: <b>+${b.totalProfitRealizedEth.toFixed(4)}Ξ</b>\n`
+    );
+  }
+
+  await send(lines.join("\n"));
+}

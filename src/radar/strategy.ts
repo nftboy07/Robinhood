@@ -1,3 +1,4 @@
+import { enrollMoonbag } from "./moonbag.js";
 import { detectParabolicClimax } from "./climaxDetector.js";
 /**
  * Comprehensive Advanced Meme Trading Strategy Suite
@@ -291,6 +292,7 @@ export async function evaluatePositions(): Promise<void> {
           const res = await swapTokenToWeth(pos.token, sellAmt, quote.fee);
           pos.tpLevelsTaken.push(4.0);
           pos.isMoonbag = true;
+          void enrollMoonbag(pos.token, pos.symbol, pos.entryPriceWeth, curBal / 2n, pos.entryWeth * 2);
           savePositions(positions);
           await send(`💎 <b>[TP3 4X MOONSHOT!] ${pos.symbol} (+300% / 4.0x)</b>\n• Sold 25% for +${ethers.formatEther(res.amountOut)}Ξ\n• Remaining 25% riding in permanent MOONBAG!`).catch(() => {});
           continue;
