@@ -79,8 +79,9 @@ export async function quoteWethToToken(
   return best;
 }
 
-function minOutWithSlippage(amountOut: bigint): bigint {
-  const bps = BigInt(Math.round((cfg.lp.slippagePct || 5) * 100)); // e.g. 5% → 500 bps
+function minOutWithSlippage(amountOut: bigint, customSlippagePct?: number): bigint {
+  const pct = customSlippagePct ?? cfg.lp.slippagePct ?? 8;
+  const bps = BigInt(Math.round(pct * 100));
   return (amountOut * (10_000n - bps)) / 10_000n;
 }
 
@@ -116,8 +117,27 @@ export async function swapTokenToWeth(
     },
     await overrides(),
   );
-  const rc = await tx.wait();
-  return { tx: tx.hash, amountOut: extractWethOut(rc, w.address) ?? quote.amountOut };
+  try {
+    const rc = await tx.wait();
+    return { tx: tx.hash, amountOut: extractWethOut(rc, w.address) ?? quote.amountOut };
+  } catch (err) {
+    log.warn(`[SELL SLIPPAGE RETRY] Initial sell reverted, retrying with 15% slippage floor...`);
+    const relaxedMinOut = minOutWithSlippage(quote.amountOut, 15);
+    const retryTx = await router.exactInputSingle!(
+      {
+        tokenIn: tokenAddr,
+        tokenOut: C.weth,
+        fee,
+        recipient: w.address,
+        amountIn: amountRaw,
+        amountOutMinimum: relaxedMinOut,
+        sqrtPriceLimitX96: 0n,
+      },
+      await overrides(),
+    );
+    const rc2 = await retryTx.wait();
+    return { tx: retryTx.hash, amountOut: extractWethOut(rc2, w.address) ?? quote.amountOut };
+  }
 }
 
 /** Swap WETH → token with slippage protection (was unprotected in v1). */
