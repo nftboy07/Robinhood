@@ -1589,3 +1589,45 @@ export async function onManualBuy(cmd: string): Promise<void> {
     await send(`⚠️ Snipe skipped/failed: ${res?.reason}`);
   }
 }
+
+export async function onAuditToken(cmd: string): Promise<void> {
+  const parts = cmd.split(/\s+/);
+  const ca = parts[1];
+  if (!ca || !ethers.isAddress(ca)) {
+    return send("⚠️ Format: <code>/audit 0xContractAddress</code>\nContoh: <code>/audit 0xd5f1afea47b1a9eab414d2ee740cf1d6d039e725</code>");
+  }
+
+  const { auditTokenSecurity, getDefiLlamaPrice } = await import("../tools/cryptoTools.js");
+  const meta = await tokenMeta(ca).catch(() => null);
+  const sym = meta?.symbol || "TOKEN";
+
+  await send(`🔍 <b>AUDITING SMART CONTRACT...</b>\n• Token: <b>$${sym}</b>\n• CA: <code>${ca}</code>`);
+
+  const [sec, price] = await Promise.all([
+    auditTokenSecurity(ca),
+    getDefiLlamaPrice(ca),
+  ]);
+
+  const scoreEmoji = sec.securityScore >= 80 ? "🟢" : sec.securityScore >= 50 ? "🟡" : "🔴";
+
+  let out = `${scoreEmoji} <b>TOKEN SECURITY AUDIT: $${sym}</b>\n\n` +
+    `• <b>Overall Safety Score:</b> ${sec.securityScore}/100\n` +
+    `• <b>Honeypot:</b> ${sec.isHoneypot ? "🚨 YES (CANNOT SELL)" : "✅ NO (Safe)"}\n` +
+    `• <b>Buy / Sell Tax:</b> ${sec.buyTaxPct.toFixed(1)}% / ${sec.sellTaxPct.toFixed(1)}%\n` +
+    `• <b>Ownership Renounced:</b> ${sec.isRenounced ? "✅ YES" : "⚠️ NO"}\n` +
+    `• <b>Verified Source:</b> ${sec.isOpenSource ? "✅ YES" : "⚠️ NO"}\n` +
+    `• <b>Mintable Supply:</b> ${sec.isMintable ? "⚠️ YES (Risk of Dilution)" : "✅ NO"}\n` +
+    `• <b>Blacklist Capability:</b> ${sec.hasBlacklist ? "⚠️ YES" : "✅ NO"}\n`;
+
+  if (price) {
+    out += `• <b>Oracle Price (DefiLlama):</b> $${price.priceUsd.toFixed(6)}\n`;
+  }
+
+  if (sec.warnings.length > 0) {
+    out += `\n⚠️ <b>Warnings:</b>\n` + sec.warnings.map((w: string) => `  • ${w}`).join("\n");
+  } else {
+    out += `\n✨ <i>Contract looks clean and passed all security criteria!</i>`;
+  }
+
+  await send(out);
+}

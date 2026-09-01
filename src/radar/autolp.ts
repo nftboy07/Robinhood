@@ -8,6 +8,7 @@ import { wallet, overrides } from "../chain/client.js";
 import { WETH_ABI } from "../chain/abis.js";
 import { trackNewMemeBuy } from "./strategy.js";
 import { isBlacklisted, addToBlacklist } from "./blacklist.js";
+import { auditTokenSecurity } from "../tools/cryptoTools.js";
 import { dataPath, readJson, writeJson } from "../util/files.js";
 import { logger } from "../util/log.js";
 import type { Candidate, Verdict } from "./radar.js";
@@ -132,6 +133,13 @@ export async function maybeAutoLp(
     if (!verdict?.llm) return skip("no LLM verdict");
     if (verdict.llm.action !== a.requireAction && verdict.llm.action !== "ape") return skip(`action ${verdict.llm.action} ≠ ${a.requireAction}`);
     if (verdict.llm.score < a.minScore) return skip(`score ${verdict.llm.score} < ${a.minScore}`);
+  }
+
+  // 3.5 GoPlus / Honeypot Smart Contract Security Scan
+  const security = await auditTokenSecurity(candidate.token);
+  if (security.isHoneypot || security.securityScore < 50) {
+    addToBlacklist(candidate.token, candidate.symbol, security.warnings.join("; ") || "Failed GoPlus Security Scan");
+    return skip(`security scan failed (Score: ${security.securityScore}/100, Honeypot: ${security.isHoneypot})`);
   }
 
   // 4. GMGN hard safety filters
