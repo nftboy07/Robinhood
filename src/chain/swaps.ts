@@ -1,11 +1,9 @@
-import { withTxLock } from "./txMutex.js";
 /**
- * Quotes + swaps. Every swap carries slippage protection derived from the Quoter —
- * including WETH→token (the old build sent amountOutMinimum: 0, i.e. a free sandwich on
- * a thin chain). We don't use smart-order-router: Robinhood Chain has no subgraph, so
- * we route single-hop through each fee tier and take the best quote.
+ * Quotes + swaps with 0ms pre-approval and atomic nonce management.
  */
 import { ethers } from "ethers";
+import { withTxLock } from "./txMutex.js";
+import { isTokenPreApprovedFast, markTokenApprovedFast } from "./zeroLatency.js";
 import { cfg, C } from "../config.js";
 import { wallet, provider, overrides } from "./client.js";
 import { ERC20_ABI, WETH_ABI, QUOTER_ABI, ROUTER_ABI } from "./abis.js";
@@ -91,7 +89,7 @@ export interface SwapResult {
   amountOut: bigint;
 }
 
-/** Swap token → WETH with slippage protection. */
+/** Swap token → WETH with slippage protection and 0ms pre-approval. */
 export async function swapTokenToWeth(
   tokenAddr: string,
   amountRaw: bigint,
@@ -100,8 +98,11 @@ export async function swapTokenToWeth(
   return withTxLock(async (nonce) => {
     const w = wallet();
     const erc = new ethers.Contract(tokenAddr, ERC20_ABI, w);
-    if ((await erc.allowance!(w.address, C.swapRouter02)) < amountRaw) {
-      await (await erc.approve!(C.swapRouter02, ethers.MaxUint256, { ...(await overrides()), nonce })).wait();
+    if (!isTokenPreApprovedFast(tokenAddr)) {
+      if ((await erc.allowance!(w.address, C.swapRouter02)) < amountRaw) {
+        await (await erc.approve!(C.swapRouter02, ethers.MaxUint256, { ...(await overrides()), nonce })).wait();
+      }
+      markTokenApprovedFast(tokenAddr);
     }
     const quote = await quoteTokenToWeth(tokenAddr, amountRaw);
     const fee = feeHint || quote.fee || 10000;
@@ -144,6 +145,7 @@ export async function swapTokenToWeth(
   });
 }
 
+/** Swap WETH → token with slippage protection. */
 export async function swapWethToToken(
   tokenAddr: string,
   wethRaw: bigint,
@@ -166,7 +168,7 @@ export async function swapWethToToken(
       fee,
       recipient: w.address,
       amountIn: wethRaw,
-      amountOutMinimum: minOut, // ← slippage floor, no longer 0
+      amountOutMinimum: minOut,
       sqrtPriceLimitX96: 0n,
     },
     await overrides(),
@@ -174,6 +176,31 @@ export async function swapWethToToken(
   await tx.wait();
   const after: bigint = await erc.balanceOf!(w.address);
   return { tx: tx.hash, amountOut: after - before };
+}
+
+/** Pre-approve token for SwapRouter02 immediately upon purchase to enable 0ms instant exit */
+export async function preApproveTokenForExit(tokenAddr: string): Promise<boolean> {
+  try {
+    if (isTokenPreApprovedFast(tokenAddr)) return true;
+    const w = wallet();
+    const erc = new ethers.Contract(tokenAddr, ERC20_ABI, w);
+    const allowance: bigint = await erc.allowance!(w.address, C.swapRouter02).catch(() => 0n);
+    if (allowance < ethers.MaxUint256 / 2n) {
+      log.info(`⚡ [INSTANT PRE-APPROVAL] Pre-approving token ${tokenAddr} for SwapRouter02...`);
+      return withTxLock(async (nonce) => {
+        const tx = await erc.approve!(C.swapRouter02, ethers.MaxUint256, { ...(await overrides()), nonce });
+        await tx.wait();
+        markTokenApprovedFast(tokenAddr);
+        log.info(`⚡ [PRE-APPROVAL COMPLETE ✅] ${tokenAddr} pre-approved for 0ms instant sell exits! (Tx: ${tx.hash})`);
+        return true;
+      });
+    }
+    markTokenApprovedFast(tokenAddr);
+    return true;
+  } catch (e) {
+    log.warn(`[PRE-APPROVE ERROR] Failed to pre-approve ${tokenAddr}: ${(e as Error).message}`);
+    return false;
+  }
 }
 
 /** Sum of WETH Transfer events into `to` in a receipt (real swap output). */
@@ -189,11 +216,6 @@ function extractWethOut(rc: ethers.TransactionReceipt | null, to: string): bigin
   return sum > 0n ? sum : null;
 }
 
-/**
- * Keep native ETH at >= target by unwrapping WETH. Called after close so gas is always
- * available for the next tx. All math in wei (BigInt) — going through float can round a
- * few wei above the real balance → withdraw reverts "burn amount exceeds balance".
- */
 export const DEFAULT_NATIVE_TARGET = 0.015;
 export async function ensureNativeEth(targetEth?: number): Promise<TopUp | null> {
   const target = Number(targetEth ?? cfg.lp.nativeTargetEth ?? DEFAULT_NATIVE_TARGET);
@@ -207,7 +229,7 @@ export async function ensureNativeEth(targetEth?: number): Promise<TopUp | null>
   if (wbalWei <= 0n) return null;
   const needWei = targetWei - nativeWei;
   const amtWei = needWei < wbalWei ? needWei : wbalWei;
-  if (amtWei < 10_000_000_000_000n) return null; // < 0.00001 ETH: not worth the gas
+  if (amtWei < 10_000_000_000_000n) return null;
   const tx = await wc.withdraw!(amtWei, await overrides());
   await tx.wait();
   const f = (v: bigint) => Number(ethers.formatEther(v));
@@ -218,26 +240,4 @@ export async function ensureNativeEth(targetEth?: number): Promise<TopUp | null>
     nativeBefore: f(nativeWei),
     nativeAfter: f(nativeWei + amtWei),
   };
-}
-
-/** Pre-approve token for SwapRouter02 immediately upon purchase to enable 0ms instant exit */
-export async function preApproveTokenForExit(tokenAddr: string): Promise<boolean> {
-  try {
-    const w = wallet();
-    const erc = new ethers.Contract(tokenAddr, ERC20_ABI, w);
-    const allowance: bigint = await erc.allowance!(w.address, C.swapRouter02).catch(() => 0n);
-    if (allowance < ethers.MaxUint256 / 2n) {
-      log.info(`⚡ [INSTANT PRE-APPROVAL] Pre-approving token ${tokenAddr} for SwapRouter02...`);
-      return withTxLock(async (nonce) => {
-        const tx = await erc.approve!(C.swapRouter02, ethers.MaxUint256, { ...(await overrides()), nonce });
-        await tx.wait();
-        log.info(`⚡ [PRE-APPROVAL COMPLETE ✅] ${tokenAddr} pre-approved for 0ms instant sell exits! (Tx: ${tx.hash})`);
-        return true;
-      });
-    }
-    return true;
-  } catch (e) {
-    log.warn(`[PRE-APPROVE ERROR] Failed to pre-approve ${tokenAddr}: ${(e as Error).message}`);
-    return false;
-  }
 }

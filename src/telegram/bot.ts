@@ -10,6 +10,7 @@ import { startCompounder } from "../radar/compounder.js";
 import { startLaunchpadScanner } from "../radar/launchpads.js";
 import { startFomoWhaleRadar } from "../radar/fomoWhales.js";
 import { startMoonbagEngine } from "../radar/moonbag.js";
+import { startGasPrewarmer } from "../chain/zeroLatency.js";
 import { startFeed, stopFeed } from "./feedLoop.js";
 import { wallet } from "../chain/client.js";
 import { cfg } from "../config.js";
@@ -161,6 +162,7 @@ export async function run(): Promise<void> {
   startLaunchpadScanner();
   startFomoWhaleRadar();
   startMoonbagEngine();
+  startGasPrewarmer();
   void startFeed(); // no-op unless cfg.feed.enabled
   let offset = 0;
   while (running) {
