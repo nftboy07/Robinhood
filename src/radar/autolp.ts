@@ -1,3 +1,16 @@
+
+/** Generate randomized, non-uniform tranche amounts totaling targetSizeEth (Anti-MEV stealth sizing) */
+export function generateRandomizedTranches(totalEth: number): number[] {
+  // Random ratio split: ~28-35% scout, ~18-25% dip, ~42-50% scale-in
+  const r1 = 0.28 + (Math.random() * 0.07); // 28% - 35%
+  const r2 = 0.18 + (Math.random() * 0.07); // 18% - 25%
+  
+  const t1 = Math.max(0.001, Number((totalEth * r1).toFixed(5)));
+  const t2 = Math.max(0.001, Number((totalEth * r2).toFixed(5)));
+  const t3 = Math.max(0.001, Number((totalEth - t1 - t2).toFixed(5)));
+
+  return [t1, t2, t3];
+}
 import { ethers } from "ethers";
 import { cfg, C } from "../config.js";
 import { findPools, pickLpPool } from "../chain/pools.js";
