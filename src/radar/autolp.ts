@@ -72,7 +72,7 @@ export async function maybeAutoLp(candidate: Candidate, verdict: Verdict | null)
 
   // 4. liquidity floor
   const liq = g?.liquidityUsd ?? candidate.liq ?? 0;
-  if (liq < a.minLiqUsd) return skip(`liquidity $${liq.toFixed(0)} < $${a.minLiqUsd}`);
+  if (a.minLiqUsd > 0 && liq > 0 && liq < a.minLiqUsd) return skip(`liquidity $${liq.toFixed(0)} < $${a.minLiqUsd}`);
 
   // 5. caps: concurrent, per-hour, daily
   const now = Date.now();

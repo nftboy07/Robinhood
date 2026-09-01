@@ -8,7 +8,9 @@
 import { ethers } from "ethers";
 // @uniswap/v3-sdk ships CommonJS — under Node ESM its named exports aren't statically
 // detected, so import the default and destructure the runtime values.
-import v3 from "@uniswap/v3-sdk";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const v3 = require("@uniswap/v3-sdk");
 import type { Pool as PoolT } from "@uniswap/v3-sdk";
 import type { Token } from "@uniswap/sdk-core";
 const { Pool, tickToPrice, TickMath } = v3;

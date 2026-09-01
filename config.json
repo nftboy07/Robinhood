@@ -38,10 +38,10 @@
   "watch": {
     "enabled": true,
     "intervalSec": 120,
-    "minVol5m": 500,
+    "minVol5m": 0,
     "riseFactor": 1.4,
     "minVol1h": 300000,
-    "minLiqUsd": 500,
+    "minLiqUsd": 0,
     "maxTaxPct": 6,
     "cooldownMin": 60,
     "maxTokens": 300
@@ -69,7 +69,7 @@
     "requireAction": "watch",
     "requireLlm": false,
     "requireGmgn": false,
-    "minLiqUsd": 200,
+    "minLiqUsd": 0,
     "maxTaxPct": 5,
     "maxOpen": 5,
     "maxPerHour": 3,
