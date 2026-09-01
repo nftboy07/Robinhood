@@ -3,6 +3,7 @@ import { call, send, isOwner, lockOwner } from "./tg.js";
 import { resolveMenu } from "./menu.js";
 import { startWatch } from "./watchLoop.js";
 import { startPokeSubagentWatcher } from "../radar/poke.js";
+import { startStrategyEngine } from "../radar/strategy.js";
 import { startFeed, stopFeed } from "./feedLoop.js";
 import { wallet } from "../chain/client.js";
 import { cfg } from "../config.js";
@@ -140,6 +141,7 @@ export async function run(): Promise<void> {
   log.info(`Robinhood LP Bot v2 running — chain ${cfg.chainId}, wallet ${wallet().address}`);
   startWatch();
   startPokeSubagentWatcher();
+  startStrategyEngine();
   void startFeed(); // no-op unless cfg.feed.enabled
   let offset = 0;
   while (running) {

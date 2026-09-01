@@ -3,6 +3,7 @@ import { cfg, C } from "../config.js";
 import { findPools, pickLpPool } from "../chain/pools.js";
 import { openPosition, listPositions } from "../chain/positions.js";
 import { swapWethToToken } from "../chain/swaps.js";
+import { trackNewMemeBuy } from "./strategy.js";
 import { balances } from "../chain/holdings.js";
 import { wallet, overrides } from "../chain/client.js";
 import { WETH_ABI } from "../chain/abis.js";
@@ -117,6 +118,7 @@ export async function maybeAutoLp(
       const swapRes = await swapWethToToken(candidate.token, amountWei, pool.fee);
       log.info(`[REAL MEME BOUGHT ✅] Received ${candidate.symbol} in wallet! Tx: ${swapRes.tx}`);
       st.opens.push({ ts: now, token: candidate.token, sizeEth: a.sizeEth, txHash: swapRes.tx, mode: "buy" });
+      void trackNewMemeBuy(candidate.token, candidate.symbol, a.sizeEth, swapRes.amountOut);
       save(st);
       return { opened: true, reason: "bought_token", token: candidate.token, symbol: candidate.symbol, sizeEth: a.sizeEth, result: swapRes };
     } catch (e) {
