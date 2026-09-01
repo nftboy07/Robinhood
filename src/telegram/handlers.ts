@@ -1631,3 +1631,57 @@ export async function onAuditToken(cmd: string): Promise<void> {
 
   await send(out);
 }
+
+export async function onRhStats(): Promise<void> {
+  const { getRobinhoodChainStats, getRobinhoodTopPools } = await import("../tools/robinhoodEcosystem.js");
+  const { getNetworkGasMetrics } = await import("../tools/cryptoTools.js");
+
+  const [stats, pools, gas] = await Promise.all([
+    getRobinhoodChainStats(),
+    getRobinhoodTopPools(),
+    getNetworkGasMetrics(),
+  ]);
+
+  let msg = `🏹 <b>ROBINHOOD CHAIN NETWORK & ECOSYSTEM STATUS</b>\n\n` +
+    `• <b>Chain ID:</b> <code>4663</code> (Mainnet)\n` +
+    `• <b>RPC:</b> <code>https://rpc.mainnet.chain.robinhood.com</code>\n` +
+    `• <b>Gas BaseFee:</b> <b>${gas.gasPriceGwei.toFixed(2)} Gwei</b> (${gas.isCongested ? "⚠️ High Congestion" : "🟢 Fast & Smooth"})\n`;
+
+  if (stats) {
+    msg += `• <b>Total Transactions:</b> ${stats.totalTransactions.toLocaleString()}\n` +
+      `• <b>Total Blocks:</b> ${stats.totalBlocks.toLocaleString()}\n` +
+      `• <b>Active Wallets:</b> ${stats.walletCount.toLocaleString()}\n` +
+      `• <b>Network TPS:</b> ~${stats.tps.toFixed(2)} tx/s\n` +
+      `• <b>Block Time:</b> ${(stats.averageBlockTimeMs / 1000).toFixed(1)}s\n`;
+  }
+
+  if (pools.length > 0) {
+    msg += `\n🔥 <b>Trending Pools (GeckoTerminal):</b>\n`;
+    for (const p of pools.slice(0, 3)) {
+      const name = p.attributes?.name || "POOL";
+      const vol = Number(p.attributes?.volume_usd?.h24 || 0);
+      msg += `  • <b>${name}</b> (24h Vol: $${vol.toLocaleString()})\n`;
+    }
+  }
+
+  await send(msg);
+}
+
+export async function onSocialSentiment(cmd: string): Promise<void> {
+  const parts = cmd.split(/\s+/);
+  const query = parts[1] || "ROBIN";
+  const { analyzeTwitterSentiment } = await import("../radar/twitterSentiment.js");
+
+  const sent = await analyzeTwitterSentiment(query, "");
+  const emoji = sent.sentimentScore >= 80 ? "🚀" : "📈";
+
+  const msg = `${emoji} <b>TWITTER ALPHA & SOCIAL SENTIMENT: $${sent.symbol}</b>\n\n` +
+    `• <b>Social Sentiment Score:</b> <b>${sent.sentimentScore}/100</b> (${sent.isViral ? "🔥 VIRAL / HIGH HYP" : "🟢 Bullish"})\n` +
+    `• <b>24h Twitter Mentions:</b> ~${sent.mentionCount24h} tweets\n` +
+    `• <b>Recent Tweet Velocity:</b> ${sent.recentTweetsCount} tweets / 15min\n` +
+    `• <b>Top CT & Robinhood Callers:</b>\n` +
+    sent.topCallersMentioning.map((c: string) => `  • ${c}`).join("\n") + `\n\n` +
+    `<i>Monitoring all 114+ Robinhood meme accounts in real-time!</i>`;
+
+  await send(msg);
+}

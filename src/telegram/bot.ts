@@ -97,6 +97,8 @@ async function routeMessage(m: any): Promise<void> {
   if (t === "/sell") return H.onSell();
   if (t === "/closeall") return H.onCloseAll();
   if (t === "/wallet") return H.onWallet();
+  if (t === "/rh" || t === "/chain") return H.onRhStats();
+  if (t.startsWith("/social ") || t === "/social") return H.onSocialSentiment(t);
   if (t === "/settings") return H.onSettings();
   if (t.startsWith("/set ")) return H.onSet(t);
   if (CA_RE.test(t)) return H.onCA(t);
