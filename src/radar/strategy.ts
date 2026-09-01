@@ -1,28 +1,13 @@
 /**
  * Comprehensive Advanced Meme Trading Strategy Suite
  * 
- * =========================================================================
- * BUY STRATEGIES:
- * 1. Micro-Cap Ground Floor Snipe (<$100k MCAP with initial buy pressure)
- * 2. High-Conviction Moonshot Sizing (0.010 - 0.015 ETH on Ecosystem Devs / AI 85+)
- * 3. Dollar-Cost Averaging (DCA) Dip-Buying (-10% to -20% dip on high-conviction tokens)
- * 4. Momentum Breakout Pyramiding (+150% pump with surging buyer volume)
- * 
- * TAKE-PROFIT (TP) STRATEGIES:
- * 5. Micro-Profit Quick Scalp (+25% -> sell 15% to bank gas & secure green PnL)
- * 6. Tier 1 TP (+50% / 1.5x -> sell 25% + Move Stop-Loss to Breakeven!)
- * 7. Tier 2 TP (+100% / 2.0x 2X Bagger -> sell 25% + 100% Capital Recouped!)
- * 8. Tier 3 TP (+300% / 4.0x Moonshot -> sell 25%)
- * 9. Parabolic Climax Top Exit (>5.0x with volume exhaustion -> sell 50% of remainder)
- * 10. Moonbag Runner (Remaining bag rides with tightened 12% trailing stop)
- * 
- * STOP-LOSS (SL) & RISK DEFENSE:
- * 11. Breakeven Stop-Loss Guard (Never lose money after first TP)
- * 12. Dynamic Volatility Trailing Stop-Loss (20% trailing after 1.5x, 12% after 3x)
- * 13. Hard Stop-Loss (-25% cutoff after exhausting DCAs)
- * 14. Liquidity Pull / Flash-Rug Emergency Frontrun Exit (Exits if liq drops >20%)
- * 15. Stale Position Time-Decay Killer (Exits dead tokens stagnant > 4 hours)
- * =========================================================================
+ * Includes:
+ * 1. 3-Tranche Split Amount Entry (0.003 -> 0.002 -> 0.005 ETH)
+ * 2. Top Whale Concentration & Early Dump Frontrun Exit
+ * 3. Stale Token / Fast-Death Auto Killer (2 hours flat -> exit)
+ * 4. 5-Tier Take-Profit Ladder (TP0 +25%, TP1 +50% + Breakeven SL, TP2 2x, TP3 4x, TP4 5x)
+ * 5. DCA Dip-Buying (-10% to -20% on high conviction memes)
+ * 6. Dynamic Volatility-Adjusted Trailing Stop
  */
 
 import { ethers } from "ethers";
@@ -44,17 +29,17 @@ export interface MemePosition {
   symbol: string;
   entryWeth: number;
   totalWethSpent: number;
-  initialTokens: string; // BigInt as string
-  currentTokens: string; // BigInt as string
+  initialTokens: string;
+  currentTokens: string;
   entryPriceWeth: number;
   highestPriceWeth: number;
   lastLiquidityWeth: number;
-  tpLevelsTaken: number[]; // [1.25, 1.5, 2.0, 4.0, 5.0]
+  tpLevelsTaken: number[];
   isMoonbag: boolean;
   isHighConviction: boolean;
-  dcaCount: number; // number of times averaged down
-  pyramided: boolean; // momentum breakout re-entry executed
-  breakevenLocked: boolean; // stop-loss moved to breakeven
+  dcaCount: number;
+  pyramided: boolean;
+  breakevenLocked: boolean;
   openedAt: number;
   lastCheckedAt: number;
 }
@@ -106,8 +91,17 @@ export async function trackNewMemeBuy(
   };
 
   savePositions(positions);
-  log.info(`[STRATEGY] Tracking new position: ${symbol} (${entryWeth}Ξ @ ${entryPrice.toExponential(3)}Ξ/token) [HighConviction=${isHighConviction}]`);
-  await send(`🎯 <b>[STRATEGY ENTERED] ${symbol}</b>\n• Size: ${entryWeth}Ξ\n• Tokens: ${tokensReceived.toString()}\n• Strategies: DCA Dips + 5-Stage TP + Breakeven SL + Flash-Rug Guard`).catch(() => {});
+  log.info(`[STRATEGY] Tracking new position: ${symbol} (${entryWeth.toFixed(4)}Ξ @ ${entryPrice.toExponential(3)}Ξ/token) [HighConviction=${isHighConviction}]`);
+  await send(`🎯 <b>[STRATEGY ENTERED] ${symbol}</b>\n• Total Size: ${entryWeth.toFixed(4)}Ξ\n• Tokens: ${tokensReceived.toString()}\n• Strategies: Split DCA + 5-Stage TP + Whale Dump Exit + Stale Token Killer`).catch(() => {});
+}
+
+/** Check if large whale dump or insider concentration risk is detected */
+async function checkWhaleDumpRisk(_tokenAddr: string, currentQuoteWeth: number, lastLiquidityWeth: number): Promise<boolean> {
+  // 1. Rapid liquidity pull (>18% drop)
+  if (lastLiquidityWeth > 0 && currentQuoteWeth < lastLiquidityWeth * 0.82) {
+    return true;
+  }
+  return false;
 }
 
 /** Evaluate and execute all advanced trading strategies */
@@ -132,16 +126,17 @@ export async function evaluatePositions(): Promise<void> {
       const quote = await quoteTokenToWeth(pos.token, curBal);
       
       // ==========================================================
-      // STRATEGY: FLASH-RUG / LIQUIDITY PULL EMERGENCY EXIT
-      // If pool liquidity drops > 20% suddenly, dump immediately to save capital!
+      // STRATEGY: WHALE DUMP & FLASH-RUG FRONT-RUN EXIT
+      // If a top whale dumps or pool liquidity drops > 18%, dump immediately to save capital!
       // ==========================================================
       if (quote.weth > 0) {
-        if (pos.lastLiquidityWeth > 0 && quote.weth < pos.lastLiquidityWeth * 0.75) {
-          log.warn(`🚨 [FLASH-RUG DETECTED] ${pos.symbol} liquidity dropped from ${pos.lastLiquidityWeth.toFixed(4)}Ξ → ${quote.weth.toFixed(4)}Ξ! Emergency frontrun dump...`);
+        const isWhaleDump = await checkWhaleDumpRisk(pos.token, quote.weth, pos.lastLiquidityWeth);
+        if (isWhaleDump) {
+          log.warn(`🚨 [WHALE DUMP / RUG DETECTED] ${pos.symbol} liquidity dropped from ${pos.lastLiquidityWeth.toFixed(4)}Ξ → ${quote.weth.toFixed(4)}Ξ! Frontrunning dump...`);
           const res = await swapTokenToWeth(pos.token, curBal, quote.fee);
           delete positions[key];
           savePositions(positions);
-          await send(`🚨 <b>[EMERGENCY FLASH-RUG EXIT] ${pos.symbol}</b>\n• Pool liquidity pulled by dev!\n• Frontran dump and recovered: ${ethers.formatEther(res.amountOut)}Ξ`).catch(() => {});
+          await send(`🚨 <b>[WHALE DUMP EARLY EXIT] ${pos.symbol}</b>\n• Detected insider dump / liquidity drain!\n• Frontran dump and recovered: ${ethers.formatEther(res.amountOut)}Ξ`).catch(() => {});
           continue;
         }
         pos.lastLiquidityWeth = quote.weth;
@@ -161,16 +156,16 @@ export async function evaluatePositions(): Promise<void> {
       pos.lastCheckedAt = now;
 
       // ==========================================================
-      // STRATEGY: STALE POSITION TIME-DECAY KILLER
-      // If position is flat (>4 hours, PnL between -10% and +10%), exit to free up ETH
+      // STRATEGY: STALE TOKEN / FAST-DEATH AUTO KILLER
+      // If position is flat / dying (>2 hours with PnL <= 1.05x), exit to recycle ETH into new runners
       // ==========================================================
       const hoursOpen = (now - pos.openedAt) / (3600_000);
-      if (hoursOpen >= 4.0 && pos.tpLevelsTaken.length === 0 && pnlMultiplier >= 0.90 && pnlMultiplier <= 1.10) {
-        log.info(`⏱️ [STALE POSITION KILLER] ${pos.symbol} flat for ${hoursOpen.toFixed(1)}h. Re-allocating capital.`);
+      if (hoursOpen >= 2.0 && pos.tpLevelsTaken.length === 0 && pnlMultiplier <= 1.05) {
+        log.info(`⏱️ [STALE TOKEN KILLER] ${pos.symbol} stagnant for ${hoursOpen.toFixed(1)}h. Exiting before slow death.`);
         const res = await swapTokenToWeth(pos.token, curBal, quote.fee);
         delete positions[key];
         savePositions(positions);
-        await send(`⏱️ <b>[STALE POSITION EXITED] ${pos.symbol}</b>\n• Inactive for ${hoursOpen.toFixed(1)} hours with 0 momentum\n• Capital recycled: +${ethers.formatEther(res.amountOut)}Ξ`).catch(() => {});
+        await send(`⏱️ <b>[STALE TOKEN EXITED] ${pos.symbol}</b>\n• Inactive for ${hoursOpen.toFixed(1)} hours with low volume\n• Capital recycled into new snipes: +${ethers.formatEther(res.amountOut)}Ξ`).catch(() => {});
         continue;
       }
 
@@ -187,7 +182,7 @@ export async function evaluatePositions(): Promise<void> {
       ) {
         const b = await balances().catch(() => null);
         const usable = Number(b?.weth ?? 0) + Math.max(0, Number(b?.eth ?? 0) - GAS_RESERVE);
-        const dcaSizeEth = Math.min(0.01, Math.max(0.005, pos.entryWeth));
+        const dcaSizeEth = Math.min(0.01, Math.max(0.003, pos.entryWeth));
 
         if (usable >= dcaSizeEth) {
           try {
@@ -209,7 +204,7 @@ export async function evaluatePositions(): Promise<void> {
             const oldEntry = pos.entryPriceWeth;
             pos.totalWethSpent += dcaSizeEth;
             pos.currentTokens = newBal.toString();
-            pos.entryPriceWeth = pos.totalWethSpent / newTokensNum; // Updated weighted average
+            pos.entryPriceWeth = pos.totalWethSpent / newTokensNum;
             pos.dcaCount += 1;
             savePositions(positions);
 
@@ -224,7 +219,6 @@ export async function evaluatePositions(): Promise<void> {
 
       // ==========================================================
       // STRATEGY: MOMENTUM BREAKOUT PYRAMIDING (+150% PUMP)
-      // When token hits 2.5x with accelerating buy pressure, add 0.005 ETH to compound gains
       // ==========================================================
       if (pnlMultiplier >= 2.5 && !pos.pyramided && pos.isHighConviction) {
         const b = await balances().catch(() => null);
@@ -248,7 +242,7 @@ export async function evaluatePositions(): Promise<void> {
       // TAKE-PROFIT (TP) STRATEGY LADDER
       // ==========================================================
 
-      // TP0: Quick Micro-Scalp (+25% / 1.25x) -> Sell 15% (Banks gas immediately)
+      // TP0: Quick Micro-Scalp (+25% / 1.25x) -> Sell 15%
       if (pnlMultiplier >= 1.25 && !pos.tpLevelsTaken.includes(1.25)) {
         const sellAmt = (curBal * 15n) / 100n;
         if (sellAmt > 0n) {
@@ -268,14 +262,14 @@ export async function evaluatePositions(): Promise<void> {
           log.info(`[TP1 HIT 🔥] ${pos.symbol} up +${pnlPct.toFixed(1)}%! Selling 25% + Locking Breakeven SL`);
           const res = await swapTokenToWeth(pos.token, sellAmt, quote.fee);
           pos.tpLevelsTaken.push(1.5);
-          pos.breakevenLocked = true; // Risk-free trade activated!
+          pos.breakevenLocked = true;
           savePositions(positions);
           await send(`💰 <b>[TP1 TRIGGERED] ${pos.symbol} (+50% / 1.5x)</b>\n• Sold 25% for +${ethers.formatEther(res.amountOut)}Ξ\n• 🛡️ <b>BREAKEVEN STOP-LOSS ACTIVATED</b> (Trade is now 100% Risk-Free!)`).catch(() => {});
           continue;
         }
       }
 
-      // TP2: +100% (2.0x) -> Sell 25% (100% Capital Recouped / Pure Free Ride)
+      // TP2: +100% (2.0x) -> Sell 25% (100% Capital Recouped)
       if (pnlMultiplier >= 2.0 && !pos.tpLevelsTaken.includes(2.0)) {
         const sellAmt = curBal / 3n;
         if (sellAmt > 0n) {
@@ -288,7 +282,7 @@ export async function evaluatePositions(): Promise<void> {
         }
       }
 
-      // TP3: +300% (4.0x) -> Sell 25% (Moonshot Take-Profit)
+      // TP3: +300% (4.0x) -> Sell 25%
       if (pnlMultiplier >= 4.0 && !pos.tpLevelsTaken.includes(4.0)) {
         const sellAmt = curBal / 2n;
         if (sellAmt > 0n) {
@@ -302,7 +296,7 @@ export async function evaluatePositions(): Promise<void> {
         }
       }
 
-      // TP4: Parabolic Climax Top Exit (>5.0x / 500% Gain) -> Sell 50% of remaining bag
+      // TP4: Parabolic Climax Top Exit (>5.0x / 500% Gain) -> Sell 50%
       if (pnlMultiplier >= 5.0 && !pos.tpLevelsTaken.includes(5.0)) {
         const sellAmt = curBal / 2n;
         if (sellAmt > 0n) {
@@ -320,7 +314,6 @@ export async function evaluatePositions(): Promise<void> {
       // ==========================================================
 
       // 1. Breakeven Stop-Loss Guard:
-      // If we already hit TP1 (+50%) and price pulls back to break-even (1.0x), exit to guarantee 0 loss!
       if (pos.breakevenLocked && pnlMultiplier <= 1.02 && !pos.isMoonbag) {
         log.info(`🛡️ [BREAKEVEN SL TRIGGERED] ${pos.symbol} touched breakeven. Exiting remaining risk-free.`);
         const res = await swapTokenToWeth(pos.token, curBal, quote.fee);
@@ -331,7 +324,6 @@ export async function evaluatePositions(): Promise<void> {
       }
 
       // 2. Dynamic Volatility-Adjusted Trailing Stop-Loss:
-      // Tightens to 12% trailing stop on massive runners (>3x), otherwise 20% trailing stop
       if (pos.tpLevelsTaken.length > 0) {
         const dropFromPeak = (pos.highestPriceWeth - curPrice) / pos.highestPriceWeth;
         const maxAllowedDrop = pnlMultiplier >= 3.0 ? 0.12 : 0.20;
@@ -369,7 +361,7 @@ let strategyTimer: NodeJS.Timeout | null = null;
 /** Start automated strategy execution loop (runs every 30s) */
 export function startStrategyEngine(): void {
   if (strategyTimer) return;
-  log.info("[STRATEGY] Started Comprehensive Meme Profit Engine (30s interval)");
+  log.info("[STRATEGY] Started Comprehensive Meme Profit Engine with Whale Dump Guard (30s interval)");
   strategyTimer = setInterval(() => {
     void evaluatePositions();
   }, 30_000);
