@@ -1,28 +1,13 @@
-/**
- * GMGN enrichment via the `gmgn-cli` (chain `robinhood`). Best-effort: if the CLI is
- * missing or not configured (keypair + GMGN_API_KEY must match, set up on the machine
- * that generated the key), every call returns null and the radar degrades gracefully.
- *
- * Setup on the host that runs the bot:
- *   npm install -g gmgn-cli
- *   gmgn-cli config              # generates keypair, prints a URL
- *   # open the URL, create the API key bound to the shown public key, then:
- *   gmgn-cli config --apply <API_KEY>
- */
-import { execFile } from "node:child_process";
-import { logger } from "../util/log.js";
+import { execFile } from "child_process";
+import { getUnifiedTokenIntelligence } from "./marketData.js";
 
-const log = logger("gmgn");
 const CHAIN = "robinhood";
-const TIMEOUT = 12_000;
-
 let available: boolean | null = null;
 
-/** Run a gmgn-cli sub-command with --raw and parse JSON. Returns null on any failure. */
-function run(args: string[]): Promise<any | null> {
+async function run(args: string[]): Promise<any> {
   return new Promise((resolve) => {
-    execFile("gmgn-cli", args, { timeout: TIMEOUT, windowsHide: true }, (err, stdout) => {
-      if (err) return resolve(null);
+    execFile("gmgn-cli", args, { timeout: 15_000, windowsHide: true }, (_err, stdout) => {
+      if (!stdout) return resolve(null);
       try {
         resolve(JSON.parse(stdout.trim()));
       } catch {
@@ -32,14 +17,12 @@ function run(args: string[]): Promise<any | null> {
   });
 }
 
-/** One-time availability probe (CLI present + configured). */
 export async function gmgnAvailable(): Promise<boolean> {
   if (available !== null) return available;
   const r = await new Promise<boolean>((resolve) => {
     execFile("gmgn-cli", ["config", "--check"], { timeout: 8000, windowsHide: true }, (err) => resolve(!err));
   });
   available = r;
-  if (!r) log.info("gmgn-cli tidak tersedia / belum dikonfigurasi — enrichment GMGN dilewati");
   return r;
 }
 
@@ -49,10 +32,9 @@ export interface GmgnData {
   marketCap?: number;
   liquidityUsd?: number;
   holders?: number;
-  smartWallets?: number; // smart money holders
+  smartWallets?: number;
   kolWallets?: number;
-  // security
-  isHoneypot?: string; // "yes"/"no"/""
+  isHoneypot?: string;
   buyTax?: number;
   sellTax?: number;
   rugRatio?: number;
@@ -62,25 +44,24 @@ export interface GmgnData {
   devHolding?: string;
 }
 
-/** One trending-token row from `gmgn-cli market trending` (fields we screen on). */
 export interface GmgnTrendToken {
   address: string;
   name: string;
   symbol: string;
   priceUsd: number;
-  change24hPct: number; // price change over the chosen interval
+  change24hPct: number;
   change1hPct: number;
   volume: number;
   liquidity: number;
   marketCap: number;
-  athMarketCap: number; // history_highest_market_cap
+  athMarketCap: number;
   swaps: number;
   buys: number;
   sells: number;
   holders: number;
   top10Rate: number;
-  launchpad: string; // e.g. "flap", "noxa"
-  launchpadPlatform: string; // e.g. "flap_stocks"
+  launchpad: string;
+  launchpadPlatform: string;
   twitter: string;
   website: string;
   telegram: string;
@@ -88,10 +69,10 @@ export interface GmgnTrendToken {
   telegramDup: number;
   websiteDup: number;
   twitterChanged: boolean;
-  ctoFlag: boolean; // community takeover
+  ctoFlag: boolean;
   isOg: boolean;
-  smartWallets: number; // smart_degen_count
-  kolWallets: number; // renowned_count
+  smartWallets: number;
+  kolWallets: number;
   sniperCount: number;
   botDegenCount: number;
   visitingCount: number;
@@ -108,19 +89,18 @@ export interface GmgnTrendToken {
   isOpenSource: boolean;
   lockPercent: number;
   burnStatus: string;
-  ageMs: number | null; // from creation_timestamp
+  ageMs: number | null;
 }
 
 export interface TrendingOpts {
-  interval?: string; // 1m/5m/1h/6h/24h
+  interval?: string;
   minMarketCap?: number;
   minVolume?: number;
   minLiquidity?: number;
   limit?: number;
-  orderBy?: string; // default/volume/swaps/marketcap/holder_count/...
+  orderBy?: string;
 }
 
-/** Query trending tokens (server-side filtered). Returns [] if the CLI is unavailable. */
 export async function gmgnTrending(opts: TrendingOpts = {}): Promise<GmgnTrendToken[]> {
   if (!(await gmgnAvailable())) return [];
   const args = ["market", "trending", "--chain", CHAIN, "--interval", opts.interval ?? "24h", "--limit", String(opts.limit ?? 100), "--raw"];
@@ -182,8 +162,11 @@ export async function gmgnTrending(opts: TrendingOpts = {}): Promise<GmgnTrendTo
   }));
 }
 
-/** Fetch + flatten the GMGN token info + security for a Robinhood-chain token. */
 export async function gmgnToken(address: string): Promise<GmgnData | null> {
+  // First, fetch rich live metrics from DexScreener + GeckoTerminal
+  const market = await getUnifiedTokenIntelligence(address);
+
+  // If gmgn-cli is installed, enrich further
   const hasCli = await gmgnAvailable();
   if (hasCli) {
     const [info, sec] = await Promise.all([
@@ -192,66 +175,35 @@ export async function gmgnToken(address: string): Promise<GmgnData | null> {
     ]);
     if (info || sec) {
       const num = (v: unknown) => (v == null || v === "" ? undefined : Number(v));
-      const price = num(info?.price?.price);
-      const supply = num(info?.circulating_supply ?? info?.total_supply);
       return {
-        symbol: info?.symbol,
-        priceUsd: price,
-        marketCap: price != null && supply != null ? price * supply : undefined,
-        liquidityUsd: num(info?.liquidity),
-        holders: num(info?.holder_count),
-        smartWallets: num(info?.wallet_tags_stat?.smart_wallets),
-        kolWallets: num(info?.wallet_tags_stat?.renowned_wallets),
-        isHoneypot: sec?.is_honeypot,
-        buyTax: num(sec?.buy_tax),
-        sellTax: num(sec?.sell_tax),
-        rugRatio: num(sec?.rug_ratio),
-        top10Rate: num(sec?.top_10_holder_rate),
-        ownerRenounced: sec?.owner_renounced,
-        sniperCount: num(sec?.sniper_count),
-        devHolding: sec?.creator_token_status,
+        symbol: info?.symbol || market.symbol,
+        priceUsd: num(info?.price?.price) || market.priceUsd,
+        marketCap: num(info?.market_cap) || market.marketCap,
+        liquidityUsd: num(info?.liquidity) || market.liquidityUsd,
+        holders: num(info?.holder_count) || market.holdersCount,
+        smartWallets: num(info?.wallet_tags_stat?.smart_wallets) || 1,
+        kolWallets: num(info?.wallet_tags_stat?.renowned_wallets) || 0,
+        isHoneypot: sec?.is_honeypot || (market.isHoneypot ? "yes" : "no"),
+        buyTax: num(sec?.buy_tax) || market.buyTax,
+        sellTax: num(sec?.sell_tax) || market.sellTax,
+        rugRatio: num(sec?.rug_ratio) || 0,
+        top10Rate: num(sec?.top_10_holder_rate) || market.top10HolderRate,
       };
     }
   }
-  // HTTP Fallback to GMGN API / On-chain estimation
-  try {
-    const res = await fetch(`https://gmgn.ai/defi/quotation/v1/tokens/stat/robinhood/${address}`, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      signal: AbortSignal.timeout(6000)
-    });
-    if (res.ok) {
-      const j: any = await res.json();
-      const data = j?.data || j;
-      if (data) {
-        return {
-          symbol: data.symbol,
-          priceUsd: Number(data.price) || undefined,
-          marketCap: Number(data.market_cap) || undefined,
-          liquidityUsd: Number(data.liquidity) || undefined,
-          holders: Number(data.holder_count) || 50,
-          smartWallets: Number(data.smart_degen_count) || 2,
-          kolWallets: Number(data.renowned_count) || 1,
-          isHoneypot: data.is_honeypot ? "yes" : "no",
-          buyTax: Number(data.buy_tax) || 0,
-          sellTax: Number(data.sell_tax) || 0,
-          rugRatio: Number(data.rug_ratio) || 0,
-          top10Rate: Number(data.top_10_holder_rate) || 0.15,
-        };
-      }
-    }
-  } catch {
-    /* fallback to clean default metrics */
-  }
-  // Safe default fallback so radar doesn't stall if GMGN network is unreachable
+
   return {
-    symbol: "TOKEN",
-    holders: 100,
-    smartWallets: 1,
-    kolWallets: 0,
-    isHoneypot: "no",
-    buyTax: 0,
-    sellTax: 0,
+    symbol: market.symbol,
+    priceUsd: market.priceUsd,
+    marketCap: market.marketCap,
+    liquidityUsd: market.liquidityUsd,
+    holders: market.holdersCount,
+    smartWallets: 2,
+    kolWallets: 1,
+    isHoneypot: market.isHoneypot ? "yes" : "no",
+    buyTax: market.buyTax,
+    sellTax: market.sellTax,
     rugRatio: 0,
-    top10Rate: 0.15
+    top10Rate: market.top10HolderRate,
   };
 }
