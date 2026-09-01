@@ -87,7 +87,8 @@ const AutoLpSchema = z.object({
   requireAction: z.enum(["ape", "watch", "skip"]).default("ape"),
   requireLlm: z.boolean().default(true), // need an LLM verdict, not just GMGN
   requireGmgn: z.boolean().default(false),
-  minLiqUsd: z.number().default(20000), // hard liquidity floor
+  minLiqUsd: z.number().default(0), // hard liquidity floor
+  maxMcapUsd: z.number().default(500000), // max 500k mcap filter
   maxTaxPct: z.number().default(5), // hard tax ceiling (GMGN)
   maxOpen: z.number().int().default(3), // max concurrent LP positions total
   maxPerHour: z.number().int().default(2), // rate limit

@@ -81,6 +81,7 @@
       "gmgn-trending",
       "noxa-curve",
       "poke-ai"
-    ]
+    ],
+    "maxMcapUsd": 500000
   }
 }
