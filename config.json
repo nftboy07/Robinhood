@@ -37,10 +37,10 @@
   "gasPriceGwei": 0,
   "watch": {
     "enabled": true,
-    "intervalSec": 120,
+    "intervalSec": 30,
     "minVol5m": 0,
-    "riseFactor": 1.4,
-    "minVol1h": 300000,
+    "riseFactor": 1.15,
+    "minVol1h": 500,
     "minLiqUsd": 0,
     "maxTaxPct": 6,
     "cooldownMin": 60,
@@ -65,13 +65,13 @@
     "enabled": true,
     "sizeEth": 0.01,
     "mode": "buy",
-    "minScore": 40,
+    "minScore": 30,
     "requireAction": "watch",
     "requireLlm": false,
     "requireGmgn": false,
     "minLiqUsd": 0,
     "maxTaxPct": 5,
-    "maxOpen": 20,
+    "maxOpen": 25,
     "maxPerHour": 15,
     "dailyCapEth": 1.0,
     "sources": [
@@ -82,6 +82,6 @@
       "noxa-curve",
       "poke-ai"
     ],
-    "maxMcapUsd": 500000
+    "maxMcapUsd": 2500000
   }
 }
