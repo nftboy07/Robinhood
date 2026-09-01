@@ -1,3 +1,4 @@
+import { detectParabolicClimax } from "./climaxDetector.js";
 /**
  * Comprehensive Advanced Meme Trading Strategy Suite
  * 
@@ -292,6 +293,23 @@ export async function evaluatePositions(): Promise<void> {
           pos.isMoonbag = true;
           savePositions(positions);
           await send(`💎 <b>[TP3 4X MOONSHOT!] ${pos.symbol} (+300% / 4.0x)</b>\n• Sold 25% for +${ethers.formatEther(res.amountOut)}Ξ\n• Remaining 25% riding in permanent MOONBAG!`).catch(() => {});
+          continue;
+        }
+      }
+
+      // ==========================================================
+      // STRATEGY: PARABOLIC CLIMAX & EXHAUSTION TOP DETECTOR
+      // ==========================================================
+      const highestMultiplier = pos.highestPriceWeth / pos.entryPriceWeth;
+      const climax = detectParabolicClimax(pnlMultiplier, 0, 0, highestMultiplier);
+      if (climax.isBlowOffTop && !pos.tpLevelsTaken.includes(999)) {
+        log.info(`👑 [CLIMAX TRIGGERED] ${pos.symbol}: ${climax.reason}! Banking 50% parabolic peak profits...`);
+        const sellAmt = curBal / 2n;
+        if (sellAmt > 0n) {
+          const res = await swapTokenToWeth(pos.token, sellAmt, quote.fee);
+          pos.tpLevelsTaken.push(999);
+          savePositions(positions);
+          await send(`👑 <b>[PARABOLIC CLIMAX EXIT] ${pos.symbol}</b>\n• <b>Reason:</b> ${climax.reason}\n• Sold 50% for +${ethers.formatEther(res.amountOut)}Ξ\n• Banked peak profits before reversal!`).catch(() => {});
           continue;
         }
       }
