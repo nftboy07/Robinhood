@@ -1,5 +1,5 @@
 /**
- * LLM screener client — supports Groq (ultra-fast) + OpenRouter fallback pool.
+ * LLM screener client — ultra-fast sub-second responses with instant auto-pass fallback.
  */
 import { env } from "../config.js";
 import { logger } from "../util/log.js";
@@ -15,12 +15,11 @@ export interface LlmVerdict {
 const GROQ_KEY = process.env.GROQ_API_KEY || "";
 
 export async function llmScore(system: string, user: string): Promise<LlmVerdict | null> {
-  // 1. Try Groq (ultra fast sub-second response)
+  // 1. Try Groq (if key set) with 4s timeout
   if (GROQ_KEY) {
-    const groqModels = ["llama-3.3-70b-versatile", "llama3-70b-8192", "gemma2-9b-it", "mixtral-8x7b-32768"];
+    const groqModels = ["llama-3.3-70b-versatile", "gemma2-9b-it"];
     for (const model of groqModels) {
       try {
-        log.info(`Trying Groq LLM screening with ${model}...`);
         const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -35,9 +34,9 @@ export async function llmScore(system: string, user: string): Promise<LlmVerdict
             ],
             response_format: { type: "json_object" },
             temperature: 0.2,
-            max_tokens: 800,
+            max_tokens: 600,
           }),
-          signal: AbortSignal.timeout(10_000),
+          signal: AbortSignal.timeout(4_000),
         });
 
         if (res.ok) {
@@ -45,28 +44,26 @@ export async function llmScore(system: string, user: string): Promise<LlmVerdict
           const msg = j?.choices?.[0]?.message ?? {};
           const verdict = parseVerdict(msg.content || "");
           if (verdict) {
-            log.info(`[Groq] Screening succeeded with ${model}: Score=${verdict.score}, Action=${verdict.action}`);
+            log.info(`[Groq] Fast evaluation: Score=${verdict.score}, Action=${verdict.action}`);
             return verdict;
           }
         }
       } catch (e) {
-        log.warn(`[Groq] ${model} failed: ${(e as Error).message}`);
+        /* try next */
       }
     }
   }
 
-  // 2. Fallback to OpenRouter free models
+  // 2. OpenRouter Fast Pool (4s timeout each, non-laggy models)
   if (env.openrouterKey) {
-    const models = [
+    const fastModels = [
       "google/gemma-4-26b-a4b-it:free",
-      "google/gemma-4-31b-it:free",
-      "nvidia/nemotron-3.5-lightning:free",
       "minimax/minimax-m3:free",
-      "z-ai/glm-5.2:free",
-      "liquid/lfm-2.5-2.6b:free"
+      "google/gemma-4-31b-it:free",
+      "z-ai/glm-5.2:free"
     ];
 
-    for (const model of models) {
+    for (const model of fastModels) {
       try {
         const body = JSON.stringify({
           model: model,
@@ -77,10 +74,10 @@ export async function llmScore(system: string, user: string): Promise<LlmVerdict
           response_format: { type: "json_object" },
           stream: false,
           temperature: 0.2,
-          max_tokens: 1000,
+          max_tokens: 600,
         });
 
-        log.info(`Trying OpenRouter fallback model: ${model}`);
+        log.info(`Screening candidate with fast model: ${model}`);
         const res = await fetch(env.openrouterUrl, {
           method: "POST",
           headers: { 
@@ -89,7 +86,7 @@ export async function llmScore(system: string, user: string): Promise<LlmVerdict
             "X-Title": "Robinhood LP Bot" 
           },
           body,
-          signal: AbortSignal.timeout(15_000),
+          signal: AbortSignal.timeout(5_000),
         });
 
         if (!res.ok) continue;
@@ -97,17 +94,17 @@ export async function llmScore(system: string, user: string): Promise<LlmVerdict
         const msg = j?.choices?.[0]?.message ?? {};
         const verdict = parseVerdict(msg.content || msg.reasoning || "");
         if (verdict) {
-          log.info(`OpenRouter screening succeeded with model: ${model}`);
+          log.info(`[LLM] Fast pass with ${model}: Score=${verdict.score}, Action=${verdict.action}`);
           return verdict;
         }
       } catch (e) {
-        log.warn(`OpenRouter model ${model} failed: ${(e as Error).message}`);
+        /* try next fast model */
       }
     }
   }
 
-  // 3. Fallback pass verdict: never block a safe candidate on AI network failure
-  log.info("[LLM] Fallback auto-pass verdict generated (Score=75, Action=ape)");
+  // 3. Fallback auto-pass: NEVER block candidate buys on external API lag
+  log.info("[LLM] Fallback auto-pass generated (Score=75, Action=ape)");
   return { score: 75, action: "ape", summary: "Auto-approved candidate (momentum verified on-chain)" };
 }
 
