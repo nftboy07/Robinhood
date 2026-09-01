@@ -4,6 +4,8 @@ import { resolveMenu } from "./menu.js";
 import { startWatch } from "./watchLoop.js";
 import { startPokeSubagentWatcher } from "../radar/poke.js";
 import { startStrategyEngine } from "../radar/strategy.js";
+import { startGasGuard } from "../chain/gasGuard.js";
+import { startCopyTrader } from "../radar/copyTrader.js";
 import { startFeed, stopFeed } from "./feedLoop.js";
 import { wallet } from "../chain/client.js";
 import { cfg } from "../config.js";
@@ -143,6 +145,8 @@ export async function run(): Promise<void> {
   startWatch();
   startPokeSubagentWatcher();
   startStrategyEngine();
+  startGasGuard();
+  startCopyTrader();
   void startFeed(); // no-op unless cfg.feed.enabled
   let offset = 0;
   while (running) {

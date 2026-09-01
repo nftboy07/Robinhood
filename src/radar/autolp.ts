@@ -7,6 +7,7 @@ import { balances } from "../chain/holdings.js";
 import { wallet, overrides } from "../chain/client.js";
 import { WETH_ABI } from "../chain/abis.js";
 import { trackNewMemeBuy } from "./strategy.js";
+import { isBlacklisted, addToBlacklist } from "./blacklist.js";
 import { dataPath, readJson, writeJson } from "../util/files.js";
 import { logger } from "../util/log.js";
 import type { Candidate, Verdict } from "./radar.js";
@@ -108,6 +109,9 @@ export async function maybeAutoLp(
     return { opened: false, reason, token: candidate.token, symbol: candidate.symbol };
   };
 
+  // 0. blacklist check (0ms latency fast-skip)
+  if (isBlacklisted(candidate.token)) return skip("blacklisted honeypot/scam token");
+
   // 1. source allowed
   if (!a.sources.includes(candidate.source)) return skip(`source ${candidate.source} not allowed`);
 
@@ -133,7 +137,10 @@ export async function maybeAutoLp(
   // 4. GMGN hard safety filters
   if (a.requireGmgn && !g) return skip("GMGN required but not available");
   if (g) {
-    if (g.isHoneypot === "yes" || (g.isHoneypot as unknown) === true) return skip("GMGN honeypot");
+    if (g.isHoneypot === "yes" || (g.isHoneypot as unknown) === true) {
+      addToBlacklist(candidate.token, candidate.symbol, "GMGN honeypot flag");
+      return skip("GMGN honeypot");
+    }
     const tax = Math.max((g.buyTax ?? 0) * 100, (g.sellTax ?? 0) * 100);
     if (tax > a.maxTaxPct) return skip(`tax ${tax.toFixed(1)}% > ${a.maxTaxPct}%`);
   }
