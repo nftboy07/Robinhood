@@ -1,3 +1,4 @@
+import { withTxLock } from "./txMutex.js";
 /**
  * Quotes + swaps. Every swap carries slippage protection derived from the Quoter —
  * including WETH→token (the old build sent amountOutMinimum: 0, i.e. a free sandwich on
@@ -96,51 +97,53 @@ export async function swapTokenToWeth(
   amountRaw: bigint,
   feeHint?: number,
 ): Promise<SwapResult> {
-  const w = wallet();
-  const erc = new ethers.Contract(tokenAddr, ERC20_ABI, w);
-  if ((await erc.allowance!(w.address, C.swapRouter02)) < amountRaw) {
-    await (await erc.approve!(C.swapRouter02, ethers.MaxUint256, await overrides())).wait();
-  }
-  const quote = await quoteTokenToWeth(tokenAddr, amountRaw);
-  const fee = feeHint || quote.fee || 10000;
-  const minOut = minOutWithSlippage(quote.amountOut);
-  const router = new ethers.Contract(C.swapRouter02, ROUTER_ABI, w);
-  const tx = await router.exactInputSingle!(
-    {
-      tokenIn: tokenAddr,
-      tokenOut: C.weth,
-      fee,
-      recipient: w.address,
-      amountIn: amountRaw,
-      amountOutMinimum: minOut,
-      sqrtPriceLimitX96: 0n,
-    },
-    await overrides(),
-  );
-  try {
-    const rc = await tx.wait();
-    return { tx: tx.hash, amountOut: extractWethOut(rc, w.address) ?? quote.amountOut };
-  } catch (err) {
-    log.warn(`[SELL SLIPPAGE RETRY] Initial sell reverted, retrying with 15% slippage floor...`);
-    const relaxedMinOut = minOutWithSlippage(quote.amountOut, 15);
-    const retryTx = await router.exactInputSingle!(
+  return withTxLock(async (nonce) => {
+    const w = wallet();
+    const erc = new ethers.Contract(tokenAddr, ERC20_ABI, w);
+    if ((await erc.allowance!(w.address, C.swapRouter02)) < amountRaw) {
+      await (await erc.approve!(C.swapRouter02, ethers.MaxUint256, { ...(await overrides()), nonce })).wait();
+    }
+    const quote = await quoteTokenToWeth(tokenAddr, amountRaw);
+    const fee = feeHint || quote.fee || 10000;
+    const minOut = minOutWithSlippage(quote.amountOut);
+    const router = new ethers.Contract(C.swapRouter02, ROUTER_ABI, w);
+    const txOverrides = await overrides();
+    const tx = await router.exactInputSingle!(
       {
         tokenIn: tokenAddr,
         tokenOut: C.weth,
         fee,
         recipient: w.address,
         amountIn: amountRaw,
-        amountOutMinimum: relaxedMinOut,
+        amountOutMinimum: minOut,
         sqrtPriceLimitX96: 0n,
       },
-      await overrides(),
+      txOverrides,
     );
-    const rc2 = await retryTx.wait();
-    return { tx: retryTx.hash, amountOut: extractWethOut(rc2, w.address) ?? quote.amountOut };
-  }
+    try {
+      const rc = await tx.wait();
+      return { tx: tx.hash, amountOut: extractWethOut(rc, w.address) ?? quote.amountOut };
+    } catch (err) {
+      log.warn(`[SELL SLIPPAGE RETRY] Initial sell reverted, retrying with 15% slippage floor...`);
+      const relaxedMinOut = minOutWithSlippage(quote.amountOut, 15);
+      const retryTx = await router.exactInputSingle!(
+        {
+          tokenIn: tokenAddr,
+          tokenOut: C.weth,
+          fee,
+          recipient: w.address,
+          amountIn: amountRaw,
+          amountOutMinimum: relaxedMinOut,
+          sqrtPriceLimitX96: 0n,
+        },
+        await overrides(),
+      );
+      const rc2 = await retryTx.wait();
+      return { tx: retryTx.hash, amountOut: extractWethOut(rc2, w.address) ?? quote.amountOut };
+    }
+  });
 }
 
-/** Swap WETH → token with slippage protection (was unprotected in v1). */
 export async function swapWethToToken(
   tokenAddr: string,
   wethRaw: bigint,
