@@ -63,10 +63,10 @@
   },
   "autoLp": {
     "enabled": true,
-    "sizeEth": 0.002,
+    "sizeEth": 0.005,
     "mode": "single",
-    "minScore": 70,
-    "requireAction": "ape",
+    "minScore": 50,
+    "requireAction": "watch",
     "requireLlm": true,
     "requireGmgn": false,
     "minLiqUsd": 20000,
