@@ -92,5 +92,5 @@ export function startApprovalFrontrunner(): void {
   log.info(`[APPROVAL-FRONTRUNNER] Started Whale Sell Approval Frontrunner Engine (2s ultra-fast loop)`);
   frontrunTimer = setInterval(() => {
     void pollWhaleApprovals();
-  }, 2000); // 2-second ultra-fast block scan
+  }, 500); // 2-second ultra-fast block scan
 }

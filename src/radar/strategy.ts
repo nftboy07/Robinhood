@@ -399,7 +399,7 @@ export function startStrategyEngine(): void {
   }
   strategyTimer = setInterval(() => {
     void evaluatePositions();
-  }, 30_000);
+  }, 10_000);
 }
 
 export function stopStrategyEngine(): void {

@@ -179,5 +179,5 @@ export function startMoonbagEngine(): void {
   log.info(`[MOONBAG] Started Autonomous Moonbag Strategy Engine (5x-100x Moonshot Ladder)`);
   moonTimer = setInterval(() => {
     void evaluateMoonbags();
-  }, 20_000); // 20s evaluation loop
+  }, 8_000); // 20s evaluation loop
 }

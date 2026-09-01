@@ -95,5 +95,5 @@ export function startFomoWhaleRadar(): void {
   log.info(`[FOMO-WHALES] Started FOMO.family & Pons Family Whale Radar (8s loop)`);
   fomoTimer = setInterval(() => {
     void pollFomoWhaleActivity();
-  }, 8_000); // Fast 8-second polling
+  }, 1500); // Fast 8-second polling
 }

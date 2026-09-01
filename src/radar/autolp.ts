@@ -87,7 +87,7 @@ async function executeSplitSnipe(
 
       // Micro-pause between tranches to let pool settle and get better prices
       if (i < tranches.length - 1) {
-        await new Promise((r) => setTimeout(r, 1_000));
+        // 0ms instant consecutive tranche dispatch
       }
     } catch (e) {
       log.warn(`⚠️ [TRANCHE ${i + 1} SKIPPED] Error: ${(e as Error).message.slice(0, 80)}`);

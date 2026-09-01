@@ -152,5 +152,5 @@ export function startChainPoolListener(): void {
   log.info(`[CHAIN-LISTENER] Started God-Mode Quad-Factory Pool Scanner (500ms sub-second micro-loop)`);
   listenerTimer = setInterval(() => {
     void pollNewPoolEvents();
-  }, 500); // Ultra-fast 500ms micro-loop
+  }, 200); // Ultra-fast 500ms micro-loop
 }

@@ -94,5 +94,5 @@ export function startLaunchpadScanner(): void {
   log.info(`[LAUNCHPADS] Started Robinhood Native Launchpad Scanner (FOMO.fund, Pons Family, Noxa, ZeroHood)`);
   launchTimer = setInterval(() => {
     void pollNativeLaunchpads();
-  }, 10_000); // Fast 10s scanner loop
+  }, 2000); // Fast 10s scanner loop
 }
