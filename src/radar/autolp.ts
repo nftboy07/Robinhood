@@ -41,6 +41,30 @@ interface State {
 const load = (): State => readJson<State>(STATE_FILE, { opens: [] });
 const save = (s: State): void => writeJson(STATE_FILE, s);
 
+/** Calculate dynamic position size based on moonshot conviction */
+function calculateOrderSizeEth(candidate: Candidate, verdict?: Verdict | null): number {
+  const score = verdict?.llm?.score ?? 50;
+  const action = verdict?.llm?.action ?? "watch";
+  const source = candidate.source;
+  const roundtrip = candidate.onchainBackPct ?? 100;
+  const vol5m = candidate.vol5m ?? 0;
+
+  // 1. Ultra High Conviction Moonshot (Score >= 85 OR Official Ecosystem Top Dev with clean roundtrip & high surge)
+  if (score >= 85 || (action === "ape" && score >= 80 && roundtrip >= 98 && vol5m > 5000)) {
+    log.info(`🚀 [MOONSHOT CONVICTION 0.01Ξ] ${candidate.symbol}: Score=${score}, Action=${action}, RT=${roundtrip}%`);
+    return 0.01;
+  }
+
+  // 2. Strong Moonshot Potential (Score 70..84 OR High Buy Pressure with clean 98%+ roundtrip)
+  if (score >= 70 || action === "ape" || (source === "poke-ai" && roundtrip >= 98) || (vol5m > 2000 && roundtrip >= 98)) {
+    log.info(`🔥 [STRONG MOONSHOT 0.005Ξ] ${candidate.symbol}: Score=${score}, Action=${action}`);
+    return 0.005;
+  }
+
+  // 3. Standard Micro-Cap Snipe (Ground floor exploration)
+  return 0.001;
+}
+
 export async function maybeAutoLp(
   candidate: Candidate,
   verdict?: Verdict | null,
@@ -70,7 +94,6 @@ export async function maybeAutoLp(
   if (isMicroCap && hasBuyPressure) {
     log.info(`⚡ [MICRO-CAP BUY PRESSURE TRIGGER (<$100k)] Fast-tracking ${candidate.symbol} (MCap: $${mcap.toFixed(0)})`);
   } else if (a.requireLlm) {
-    // Standard LLM verdict gate for tokens between $100k - $500k
     if (!verdict?.llm) return skip("no LLM verdict");
     if (verdict.llm.action !== a.requireAction && verdict.llm.action !== "ape") return skip(`action ${verdict.llm.action} ≠ ${a.requireAction}`);
     if (verdict.llm.score < a.minScore) return skip(`score ${verdict.llm.score} < ${a.minScore}`);
@@ -88,6 +111,9 @@ export async function maybeAutoLp(
   const liq = g?.liquidityUsd ?? candidate.liq ?? 0;
   if (a.minLiqUsd > 0 && liq > 0 && liq < a.minLiqUsd) return skip(`liquidity $${liq.toFixed(0)} < $${a.minLiqUsd}`);
 
+  // Dynamic order sizing: 0.005 - 0.01 ETH for moonshots, 0.001 ETH for base snipes
+  const dynamicSizeEth = calculateOrderSizeEth(candidate, verdict);
+
   // 6. Caps
   const now = Date.now();
   const st = load();
@@ -97,13 +123,13 @@ export async function maybeAutoLp(
   const lastHour = st.opens.filter((o) => now - o.ts < 3600_000).length;
   if (lastHour >= a.maxPerHour) return skip(`${lastHour} open/hour ≥ maxPerHour ${a.maxPerHour}`);
   const spentToday = st.opens.reduce((s, o) => s + o.sizeEth, 0);
-  if (spentToday + a.sizeEth > a.dailyCapEth) return skip(`daily cap: ${spentToday.toFixed(4)}+${a.sizeEth} > ${a.dailyCapEth}Ξ`);
+  if (spentToday + dynamicSizeEth > a.dailyCapEth) return skip(`daily cap: ${spentToday.toFixed(4)}+${dynamicSizeEth} > ${a.dailyCapEth}Ξ`);
 
-  // 7. Wallet funds
+  // 7. Wallet funds check
   const b = await balances().catch(() => null);
   if (b) {
     const usable = Number(b.weth) + Math.max(0, Number(b.eth) - GAS_RESERVE);
-    if (usable < a.sizeEth) return skip(`balance ${usable.toFixed(5)} < size ${a.sizeEth}`);
+    if (usable < dynamicSizeEth) return skip(`balance ${usable.toFixed(5)} < size ${dynamicSizeEth}`);
     if (Number(b.eth) < GAS_RESERVE) return skip(`native ETH < gas reserve`);
   }
 
@@ -113,7 +139,7 @@ export async function maybeAutoLp(
   if (!pool) return skip(`no active pool found on DEX`);
 
   const w = wallet();
-  const amountWei = ethers.parseEther(String(a.sizeEth));
+  const amountWei = ethers.parseEther(String(dynamicSizeEth));
 
   // Ensure WETH wrapped
   const wc = new ethers.Contract(C.weth, [...WETH_ABI, "function deposit() payable"], w);
@@ -126,23 +152,23 @@ export async function maybeAutoLp(
   // 9. EXECUTE DIRECT BUY OR LP
   if (String(a.mode) === "buy" || String(a.mode) === "swap") {
     try {
-      log.info(`[REAL MEME BUY] Swapping ${a.sizeEth}Ξ WETH → ${candidate.symbol} (${candidate.token})`);
+      log.info(`[REAL MEME BUY] Swapping ${dynamicSizeEth}Ξ WETH → ${candidate.symbol} (${candidate.token})`);
       const swapRes = await swapWethToToken(candidate.token, amountWei, pool.fee);
-      log.info(`[REAL MEME BOUGHT ✅] Received ${candidate.symbol} in wallet! Tx: ${swapRes.tx}`);
-      st.opens.push({ ts: now, token: candidate.token, sizeEth: a.sizeEth, txHash: swapRes.tx, mode: "buy" });
+      log.info(`[REAL MEME BOUGHT ✅] Received ${candidate.symbol} in wallet! Size: ${dynamicSizeEth}Ξ, Tx: ${swapRes.tx}`);
+      st.opens.push({ ts: now, token: candidate.token, sizeEth: dynamicSizeEth, txHash: swapRes.tx, mode: "buy" });
       save(st);
-      void trackNewMemeBuy(candidate.token, candidate.symbol, a.sizeEth, swapRes.amountOut);
-      return { opened: true, reason: "bought_token", token: candidate.token, symbol: candidate.symbol, sizeEth: a.sizeEth, result: swapRes };
+      void trackNewMemeBuy(candidate.token, candidate.symbol, dynamicSizeEth, swapRes.amountOut);
+      return { opened: true, reason: "bought_token", token: candidate.token, symbol: candidate.symbol, sizeEth: dynamicSizeEth, result: swapRes };
     } catch (e) {
       return skip(`buy failed: ${(e as Error).message.slice(0, 100)}`);
     }
   } else {
     try {
-      log.info(`AUTO-OPEN ${candidate.symbol} ${a.sizeEth}Ξ ${a.mode} pool fee ${pool.fee}`);
-      const result = await openPosition(candidate.token, pool.pool, String(a.sizeEth), { mode: a.mode as MintMode });
-      st.opens.push({ ts: now, token: candidate.token, sizeEth: a.sizeEth, tokenId: result.tokenId, mode: a.mode });
+      log.info(`AUTO-OPEN ${candidate.symbol} ${dynamicSizeEth}Ξ ${a.mode} pool fee ${pool.fee}`);
+      const result = await openPosition(candidate.token, pool.pool, String(dynamicSizeEth), { mode: a.mode as MintMode });
+      st.opens.push({ ts: now, token: candidate.token, sizeEth: dynamicSizeEth, tokenId: result.tokenId, mode: a.mode });
       save(st);
-      return { opened: true, reason: "opened_lp", token: candidate.token, symbol: candidate.symbol, sizeEth: a.sizeEth, result };
+      return { opened: true, reason: "opened_lp", token: candidate.token, symbol: candidate.symbol, sizeEth: dynamicSizeEth, result };
     } catch (e) {
       return skip(`open failed: ${(e as Error).message.slice(0, 100)}`);
     }
