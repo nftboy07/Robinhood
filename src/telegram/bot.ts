@@ -7,6 +7,7 @@ import { startStrategyEngine } from "../radar/strategy.js";
 import { startGasGuard } from "../chain/gasGuard.js";
 import { startCopyTrader } from "../radar/copyTrader.js";
 import { startCompounder } from "../radar/compounder.js";
+import { startLaunchpadScanner } from "../radar/launchpads.js";
 import { startFeed, stopFeed } from "./feedLoop.js";
 import { wallet } from "../chain/client.js";
 import { cfg } from "../config.js";
@@ -152,6 +153,7 @@ export async function run(): Promise<void> {
   startGasGuard();
   startCopyTrader();
   startCompounder();
+  startLaunchpadScanner();
   void startFeed(); // no-op unless cfg.feed.enabled
   let offset = 0;
   while (running) {
