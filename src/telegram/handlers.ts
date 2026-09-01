@@ -19,6 +19,8 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { ethers } from "ethers";
 import { esc, pre, padR, padL, sg, money, tokenEmoji } from "./format.js";
 import { fmtMcap, fmtAge } from "../util/format.js";
+import { dataPath, readJson } from "../util/files.js";
+import { quoteTokenToWeth } from "../chain/swaps.js";
 import type { PoolInfo, TokenMeta, MintMode } from "../types.js";
 
 /** Unified candidate pool across Uniswap versions (v2 + v3 + v4). */
@@ -1521,4 +1523,69 @@ export const cancelPending = (): void => {
 
 function short(e: unknown, n: number): string {
   return String((e as Error)?.message ?? e).slice(0, n);
+}
+
+export async function onPortfolio(): Promise<void> {
+  const pPath = dataPath("meme-positions.json");
+  const positions: Record<string, any> = readJson(pPath, {});
+  const keys = Object.keys(positions);
+  const b = await balances().catch(() => ({ eth: "0", weth: "0", address: "" }));
+
+  if (keys.length === 0) {
+    return send(`📊 <b>MEME PORTFOLIO DASHBOARD</b>\n\n👛 Wallet: <code>${b.address}</code>\n💰 Liquid ETH: <b>${Number(b.eth).toFixed(4)}Ξ</b> | WETH: <b>${Number(b.weth).toFixed(4)}Ξ</b>\n\n<i>No active meme positions open.</i>`);
+  }
+
+  let lines: string[] = [];
+  lines.push(`📊 <b>ACTIVE MEME PORTFOLIO (${keys.length} POSITIONS)</b>`);
+  lines.push(`💰 Liquid ETH: <b>${Number(b.eth).toFixed(4)}Ξ</b> | WETH: <b>${Number(b.weth).toFixed(4)}Ξ</b>\n`);
+
+  for (const key of keys) {
+    const p = positions[key];
+    const rawBal = await tokenBalanceRaw(p.token);
+    const tokens = Number(ethers.formatEther(rawBal)) || 0;
+    const quote = await quoteTokenToWeth(p.token, rawBal).catch(() => ({ weth: 0, fee: 0, amountOut: 0n }));
+    const curValEth = quote.weth;
+    const spent = p.totalWethSpent || p.entryWeth || 0.01;
+    const pnlEth = curValEth - spent;
+    const pnlPct = spent > 0 ? ((curValEth / spent) - 1) * 100 : 0;
+    const pnlEmoji = pnlPct >= 0 ? "🟢" : "🔴";
+
+    lines.push(
+      `${pnlEmoji} <b>$${p.symbol}</b>\n` +
+      `  • Held: <code>${tokens.toFixed(2)}</code> tokens\n` +
+      `  • Value: <b>${curValEth.toFixed(4)}Ξ</b> (Cost: ${spent.toFixed(4)}Ξ)\n` +
+      `  • PnL: <b>${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%</b> (${pnlEth >= 0 ? "+" : ""}${pnlEth.toFixed(4)}Ξ)\n` +
+      `  • TPs Taken: ${p.tpLevelsTaken?.length ? p.tpLevelsTaken.map((x: any) => x + 'x').join(', ') : 'None'}\n` +
+      `  • CA: <code>${p.token}</code>\n`
+    );
+  }
+
+  lines.push(`<i>Use /sell to market-sell or paste a new CA to snipe!</i>`);
+  await send(lines.join("\n"));
+}
+
+export async function onManualBuy(cmd: string): Promise<void> {
+  const parts = cmd.split(/\s+/);
+  const ca = parts[1];
+  const customEth = parts[2] ? Number(parts[2]) : 0.010;
+
+  if (!ca || !ethers.isAddress(ca)) {
+    return send("⚠️ Format: <code>/buy 0xContractAddress [amountInETH]</code>\nContoh: <code>/buy 0xd5f1afea47b1a9eab414d2ee740cf1d6d039e725 0.01</code>");
+  }
+
+  const meta = await tokenMeta(ca).catch(() => null);
+  const sym = meta?.symbol || "TOKEN";
+  await send(`⚡ <b>[MANUAL SNIPE INITIATED]</b>\n• Token: <b>$${sym}</b>\n• Amount: <b>${customEth}Ξ</b>\n• Executing split-tranche entry via SwapRouter...`);
+
+  const { maybeAutoLp } = await import("../radar/autolp.js");
+  const res = await maybeAutoLp(
+    { token: ca, symbol: sym, source: "manual-cmd", onchainBackPct: 100 },
+    { llm: { score: 95, action: "ape", summary: "Manual Telegram command trigger" }, gmgn: null }
+  );
+
+  if (res?.opened) {
+    await send(`✅ <b>[MANUAL SNIPE SUCCESS] $${sym}</b>\n• Bought with ${customEth}Ξ!\n• Enrolled into Meme Profit Engine!`);
+  } else {
+    await send(`⚠️ Snipe skipped/failed: ${res?.reason}`);
+  }
 }

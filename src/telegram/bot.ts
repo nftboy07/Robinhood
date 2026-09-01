@@ -88,7 +88,8 @@ async function routeMessage(m: any): Promise<void> {
   if (t.startsWith("/v4close")) return H.onV4Close(t);
   if (t.startsWith("/v4")) return H.onV4(t.split(/\s+/)[1]);
   if (t.startsWith("/v2close")) return H.onV2Close(t.split(/\s+/)[1] ?? "");
-  if (t === "/pnl") return H.onPnl();
+  if (t === "/pnl" || t === "/portfolio" || t === "/positions") return H.onPortfolio();
+  if (t.startsWith("/buy ")) return H.onManualBuy(t);
   if (t === "/sell") return H.onSell();
   if (t === "/closeall") return H.onCloseAll();
   if (t === "/wallet") return H.onWallet();
