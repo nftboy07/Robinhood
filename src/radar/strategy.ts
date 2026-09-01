@@ -1,3 +1,4 @@
+import { getActiveAlerts, markAlertTriggered } from "./customAlerts.js";
 import { enrollMoonbag } from "./moonbag.js";
 import { detectParabolicClimax } from "./climaxDetector.js";
 /**
@@ -154,6 +155,15 @@ export async function evaluatePositions(): Promise<void> {
       }
 
       const pnlMultiplier = curPrice / pos.entryPriceWeth;
+      
+      // Check custom user alerts
+      const activeAlerts = getActiveAlerts();
+      for (const al of activeAlerts) {
+        if (al.symbol === pos.symbol.toUpperCase() && pnlMultiplier >= al.targetMultiplier) {
+          markAlertTriggered(al.symbol, al.targetMultiplier);
+          await send(`🔔 <b>[CUSTOM TARGET REACHED! 🎯] $${pos.symbol}</b>\n• Reached Target: <b>${al.targetMultiplier}x (${pnlMultiplier.toFixed(1)}x Current)</b>\n• Unrealized Value: <b>${quote.weth.toFixed(4)}Ξ</b>`).catch(() => {});
+        }
+      }
       const pnlPct = (pnlMultiplier - 1) * 100;
       pos.lastCheckedAt = now;
 

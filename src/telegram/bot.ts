@@ -102,6 +102,8 @@ async function routeMessage(m: any): Promise<void> {
   if (t === "/wallet") return H.onWallet();
   if (t === "/rh" || t === "/chain") return H.onRhStats();
   if (t === "/moonbags" || t === "/moonbag") return H.onMoonbags();
+  if (t === "/stats" || t === "/report") return H.onDailyStats();
+  if (t.startsWith("/alert ") || t === "/alert") return H.onSetAlert(t);
   if (t.startsWith("/social ") || t === "/social") return H.onSocialSentiment(t);
   if (t === "/settings") return H.onSettings();
   if (t.startsWith("/set ")) return H.onSet(t);

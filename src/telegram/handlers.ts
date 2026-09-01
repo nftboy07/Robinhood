@@ -1717,3 +1717,24 @@ export async function onMoonbags(): Promise<void> {
 
   await send(lines.join("\n"));
 }
+
+export async function onDailyStats(): Promise<void> {
+  const { generateDailyReport } = await import("./dailyReport.js");
+  const report = await generateDailyReport();
+  await send(report);
+}
+
+export async function onSetAlert(cmd: string): Promise<void> {
+  const parts = cmd.split(/\s+/);
+  const sym = parts[1];
+  const targetStr = parts[2] ? parts[2].replace('x', '') : '2';
+  const target = Number(targetStr);
+
+  if (!sym || isNaN(target) || target <= 1) {
+    return send("⚠️ Format: <code>/alert SYMBOL MULTIPLIER</code>\nContoh: <code>/alert GLD 5</code> atau <code>/alert NAVEN 3x</code>");
+  }
+
+  const { setCustomAlert } = await import("../radar/customAlerts.js");
+  setCustomAlert(sym, target);
+  await send(`🔔 <b>[ALERT SET]</b>\n• Token: <b>$${sym.toUpperCase()}</b>\n• Target: <b>${target}x Multiplier</b>\n• The bot will immediately notify you when hit!`);
+}
