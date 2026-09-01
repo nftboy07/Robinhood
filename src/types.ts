@@ -1,6 +1,6 @@
 /** Shared domain types. Kept framework-free so both chain/ and telegram/ can import them. */
 
-export type MintMode = "single" | "inrange";
+export type MintMode = "single" | "inrange" | "buy" | "swap";
 
 /** A WETH-paired pool discovered for a token. */
 export interface PoolInfo {

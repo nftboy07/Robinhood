@@ -82,7 +82,7 @@ const RadarSchema = z.object({
 const AutoLpSchema = z.object({
   enabled: z.boolean().default(false),
   sizeEth: z.number().positive().default(0.001), // ETH per auto position
-  mode: z.enum(["single", "inrange"]).default("single"), // single = rug-safe
+  mode: z.enum(["single", "inrange", "buy", "swap"]).default("buy"), // single = rug-safe
   minScore: z.number().min(0).max(100).default(75), // radar LLM score floor
   requireAction: z.enum(["ape", "watch", "skip"]).default("ape"),
   requireLlm: z.boolean().default(true), // need an LLM verdict, not just GMGN

@@ -1,30 +1,38 @@
-/**
- * Autonomous LP: candidate → radar verdict → (many gates) → auto-open a position.
- *
- * ⚠️ This SPENDS REAL FUNDS with no human tap. Every gate below must pass, and it's OFF
- * by default with conservative caps. Defense in depth: the LLM verdict is necessary but
- * NOT sufficient — hard on-chain/GMGN filters + rate/size/count caps sit in front of it.
- * Single-side mode by default = rug-safe (parks ETH, buys token only if price enters range).
- */
-import { cfg } from "../config.js";
+import { ethers } from "ethers";
+import { cfg, C } from "../config.js";
 import { findPools, pickLpPool } from "../chain/pools.js";
 import { openPosition, listPositions } from "../chain/positions.js";
+import { swapWethToToken } from "../chain/swaps.js";
 import { balances } from "../chain/holdings.js";
+import { wallet, overrides } from "../chain/client.js";
+import { WETH_ABI } from "../chain/abis.js";
 import { dataPath, readJson, writeJson } from "../util/files.js";
 import { logger } from "../util/log.js";
 import type { Candidate, Verdict } from "./radar.js";
-import type { OpenResult } from "../types.js";
+import type { OpenResult, MintMode } from "../types.js";
 
 const log = logger("autolp");
 const STATE_FILE = dataPath("autolp-state.json");
-const GAS_RESERVE = 0.0004;
+const GAS_RESERVE = 0.005; // ETH kept untouched for gas
+
+export interface AutoLpResult {
+  opened: boolean;
+  reason: string;
+  token: string;
+  symbol: string;
+  sizeEth?: number;
+  result?: OpenResult | any;
+}
 
 interface OpenRecord {
   ts: number;
   token: string;
   sizeEth: number;
-  tokenId: string | null;
+  tokenId?: string | null;
+  txHash?: string;
+  mode?: string;
 }
+
 interface State {
   opens: OpenRecord[];
 }
@@ -32,17 +40,10 @@ interface State {
 const load = (): State => readJson<State>(STATE_FILE, { opens: [] });
 const save = (s: State): void => writeJson(STATE_FILE, s);
 
-export interface AutoLpResult {
-  opened: boolean;
-  reason: string; // why skipped, or "opened"
-  token: string;
-  symbol: string;
-  sizeEth?: number;
-  result?: OpenResult;
-}
-
-/** Run the full gate chain; open a position only if ALL pass. Returns null if disabled. */
-export async function maybeAutoLp(candidate: Candidate, verdict: Verdict | null): Promise<AutoLpResult | null> {
+export async function maybeAutoLp(
+  candidate: Candidate,
+  verdict?: Verdict | null,
+): Promise<AutoLpResult | null> {
   const a = cfg.autoLp;
   if (!a.enabled) return null;
 
@@ -61,7 +62,7 @@ export async function maybeAutoLp(candidate: Candidate, verdict: Verdict | null)
     if (verdict.llm.score < a.minScore) return skip(`score ${verdict.llm.score} < ${a.minScore}`);
   }
 
-  // 3. GMGN hard filters (defense beyond the LLM)
+  // 3. GMGN hard filters
   const g = verdict?.gmgn ?? null;
   if (a.requireGmgn && !g) return skip("GMGN required but not available");
   if (g) {
@@ -70,14 +71,14 @@ export async function maybeAutoLp(candidate: Candidate, verdict: Verdict | null)
     if (tax > a.maxTaxPct) return skip(`tax ${tax.toFixed(1)}% > ${a.maxTaxPct}%`);
   }
 
-  // 4. liquidity floor
+  // 4. liquidity floor (only if liq > 0)
   const liq = g?.liquidityUsd ?? candidate.liq ?? 0;
   if (a.minLiqUsd > 0 && liq > 0 && liq < a.minLiqUsd) return skip(`liquidity $${liq.toFixed(0)} < $${a.minLiqUsd}`);
 
-  // 5. caps: concurrent, per-hour, daily
+  // 5. caps
   const now = Date.now();
   const st = load();
-  st.opens = st.opens.filter((o) => now - o.ts < 24 * 3600_000); // prune >24h
+  st.opens = st.opens.filter((o) => now - o.ts < 24 * 3600_000);
   const openPositions = await listPositions().then((r) => r.length).catch(() => 0);
   if (openPositions >= a.maxOpen) return skip(`open positions ${openPositions} ≥ maxOpen ${a.maxOpen}`);
   const lastHour = st.opens.filter((o) => now - o.ts < 3600_000).length;
@@ -85,7 +86,7 @@ export async function maybeAutoLp(candidate: Candidate, verdict: Verdict | null)
   const spentToday = st.opens.reduce((s, o) => s + o.sizeEth, 0);
   if (spentToday + a.sizeEth > a.dailyCapEth) return skip(`daily cap: ${spentToday.toFixed(4)}+${a.sizeEth} > ${a.dailyCapEth}Ξ`);
 
-  // 6. wallet has funds
+  // 6. wallet funds
   const b = await balances().catch(() => null);
   if (b) {
     const usable = Number(b.weth) + Math.max(0, Number(b.eth) - GAS_RESERVE);
@@ -93,24 +94,47 @@ export async function maybeAutoLp(candidate: Candidate, verdict: Verdict | null)
     if (Number(b.eth) < GAS_RESERVE) return skip(`native ETH < gas reserve`);
   }
 
-  // 7. pick pool honoring the fee focus (>= minFeePpm, prefer highest)
+  // 7. pick pool
   const pools = await findPools(candidate.token).catch(() => []);
-  const pool = pickLpPool(pools);
-  if (!pool) return skip(`no pool v3 with fee ≥ ${(cfg.lp.minFeePpm / 10000).toFixed(2)}%`);
+  const pool = pickLpPool(pools) || (pools.length > 0 ? pools[0] : null);
+  if (!pool) return skip(`no active pool found on DEX`);
 
-  // 8. OPEN
-  try {
-    log.info(`AUTO-OPEN ${candidate.symbol} ${a.sizeEth}Ξ ${a.mode} pool fee ${pool.fee}`);
-    const result = await openPosition(candidate.token, pool.pool, String(a.sizeEth), { mode: a.mode });
-    st.opens.push({ ts: now, token: candidate.token, sizeEth: a.sizeEth, tokenId: result.tokenId });
-    save(st);
-    return { opened: true, reason: "opened", token: candidate.token, symbol: candidate.symbol, sizeEth: a.sizeEth, result };
-  } catch (e) {
-    return skip(`open failed: ${(e as Error).message.slice(0, 100)}`);
+  const w = wallet();
+  const amountWei = ethers.parseEther(String(a.sizeEth));
+
+  // Ensure WETH wrapped
+  const wc = new ethers.Contract(C.weth, [...WETH_ABI, "function deposit() payable"], w);
+  const wbal: bigint = await wc.balanceOf!(w.address).catch(() => 0n);
+  if (wbal < amountWei) {
+    const wrapTx = await wc.deposit!({ value: amountWei - wbal, ...(await overrides()) });
+    await wrapTx.wait();
+  }
+
+  // 8. EXECUTE DIRECT BUY OR LP
+  if (String(a.mode) === "buy" || String(a.mode) === "swap") {
+    try {
+      log.info(`[REAL MEME BUY] Swapping ${a.sizeEth}Ξ WETH → ${candidate.symbol} (${candidate.token})`);
+      const swapRes = await swapWethToToken(candidate.token, amountWei, pool.fee);
+      log.info(`[REAL MEME BOUGHT ✅] Received ${candidate.symbol} in wallet! Tx: ${swapRes.tx}`);
+      st.opens.push({ ts: now, token: candidate.token, sizeEth: a.sizeEth, txHash: swapRes.tx, mode: "buy" });
+      save(st);
+      return { opened: true, reason: "bought_token", token: candidate.token, symbol: candidate.symbol, sizeEth: a.sizeEth, result: swapRes };
+    } catch (e) {
+      return skip(`buy failed: ${(e as Error).message.slice(0, 100)}`);
+    }
+  } else {
+    try {
+      log.info(`AUTO-OPEN ${candidate.symbol} ${a.sizeEth}Ξ ${a.mode} pool fee ${pool.fee}`);
+      const result = await openPosition(candidate.token, pool.pool, String(a.sizeEth), { mode: a.mode as MintMode });
+      st.opens.push({ ts: now, token: candidate.token, sizeEth: a.sizeEth, tokenId: result.tokenId, mode: a.mode });
+      save(st);
+      return { opened: true, reason: "opened_lp", token: candidate.token, symbol: candidate.symbol, sizeEth: a.sizeEth, result };
+    } catch (e) {
+      return skip(`open failed: ${(e as Error).message.slice(0, 100)}`);
+    }
   }
 }
 
-/** Snapshot for /auto status. */
 export function autoLpStatus(): { spentToday: number; opensToday: number; lastHour: number } {
   const now = Date.now();
   const st = load();
