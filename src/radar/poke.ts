@@ -11,31 +11,44 @@ const POKE_API_KEY = process.env.POKE_API_KEY || "";
 const POKE_URL = process.env.POKE_API_URL || "https://poke.com/api/v1/inbound/api-message";
 const SEEN_CAS_FILE = dataPath("twitter-seen-cas.json");
 
-export const ROBINHOOD_ECOSYSTEM_ACCOUNTS = {
-  mustWatch: [
+export const CT_WATCHLIST = {
+  // 1. Official Robinhood Chain Ecosystem (40 Accounts)
+  robinhoodEcosystem: [
     "@Morpho", "@ponsdotfamily", "@bankrbot", "@ArtificiallyInu", "@cashcatfun",
     "@NetNetCap", "@arcus_xyz", "@Lighter_xyz", "@rialto_xyz", "@TheIndexFi",
-    "@ClutchMarkets", "@Hookrfun", "@virtuals_io"
+    "@ClutchMarkets", "@Hookrfun", "@virtuals_io", "@prismassets", "@KarmaWallet",
+    "@longdotxyz", "@ProjectVEXai", "@canopyfinance", "@deltaliquidity", "@pools_dot_fun",
+    "@mobyagent", "@uponrh", "@isBacked_", "@ClawBankHQ", "@sherwoodagent",
+    "@RamsesExchange", "@fablesfi", "@rallypadfun", "@ArrowFinanceio", "@L4VAprotocol",
+    "@S_L_V_R_FUN", "@vantis_ai", "@grid_arena", "@letscashfun", "@longbowlend",
+    "@JoinCtrlFi", "@robinscanio", "@hypdlaunch", "@gangswtf", "@xona_agent"
   ],
-  strongProjects: [
-    "@prismassets", "@KarmaWallet", "@longdotxyz", "@ProjectVEXai", "@canopyfinance",
-    "@deltaliquidity", "@pools_dot_fun", "@mobyagent", "@uponrh", "@isBacked_",
-    "@ClawBankHQ", "@sherwoodagent", "@RamsesExchange", "@fablesfi"
+
+  // 2. Top CT Meme Callers & Alpha Influencers
+  topCtAlphas: [
+    "@blknoiz06", "@theunipcs", "@MustStopMurad", "@ansem", "@Cobie",
+    "@HsakaTrades", "@GCRClassic", "@cryptomanran", "@rektfencer", "@CrashiusClay69",
+    "@0xSunMarket", "@cryptunez", "@CentrifugeCrypto", "@Defi_Made_Here", "@ThorHartvigsen"
   ],
-  interesting: [
-    "@rallypadfun", "@ArrowFinanceio", "@L4VAprotocol", "@S_L_V_R_FUN",
-    "@vantis_ai", "@grid_arena", "@letscashfun"
+
+  // 3. CT On-Chain Whale Trackers & Intelligence Feeds
+  whaleTrackers: [
+    "@lookonchain", "@dexscreener", "@bubblemaps", "@gmgnai", "@DefiLlama",
+    "@DuneAnalytics", "@whale_alert", "@ai_metadatabot", "@pepewhales", "@spotonchain"
   ],
-  early: [
-    "@longbowlend", "@JoinCtrlFi", "@robinscanio", "@hypdlaunch", "@gangswtf", "@xona_agent"
+
+  // 4. Crypto AI Agents & Key Leaders
+  aiAndLeaders: [
+    "@VladTenev", "@RobinhoodApp", "@VitalikButerin", "@HaydenZadler", "@shawmakesmagic",
+    "@ai16zdao", "@truth_terminal", "@zerebro", "@clanker", "@pumpdotfun"
   ]
 };
 
 const ALL_ACCOUNTS = [
-  ...ROBINHOOD_ECOSYSTEM_ACCOUNTS.mustWatch,
-  ...ROBINHOOD_ECOSYSTEM_ACCOUNTS.strongProjects,
-  ...ROBINHOOD_ECOSYSTEM_ACCOUNTS.interesting,
-  ...ROBINHOOD_ECOSYSTEM_ACCOUNTS.early
+  ...CT_WATCHLIST.robinhoodEcosystem,
+  ...CT_WATCHLIST.topCtAlphas,
+  ...CT_WATCHLIST.whaleTrackers,
+  ...CT_WATCHLIST.aiAndLeaders
 ];
 
 function loadSeenCas(): Record<string, number> {
@@ -52,10 +65,10 @@ export function extractCasFromText(text: string): string[] {
   return Array.from(new Set(matches.map((a) => a.toLowerCase())));
 }
 
-/** Process a newly discovered CA from Twitter / Poke AI */
+/** Process a newly discovered CA from Twitter / CT / Poke AI */
 export async function processTwitterCaCandidate(
   rawCa: string,
-  author: string = "Twitter",
+  author: string = "CT Alpha Account",
   tweetSnippet: string = ""
 ): Promise<boolean> {
   const ca = rawCa.toLowerCase();
@@ -73,8 +86,8 @@ export async function processTwitterCaCandidate(
     const symbol: string = await contract.symbol!().catch(() => "");
     if (!symbol) return false; // not an ERC-20
 
-    log.info(`🐦 [TWITTER / POKE AI CA FOUND] ${symbol} (${ca}) from ${author}`);
-    await send(`🐦 <b>[TWITTER NEW CA DETECTED]</b>\n• Token: <b>$${symbol}</b>\n• CA: <code>${ca}</code>\n• Source: ${author}\n• Snippet: <i>${tweetSnippet.slice(0, 140)}</i>\n• Triggering automated position entry...`).catch(() => {});
+    log.info(`🐦 [CT ALPHA / WHALE CA FOUND] ${symbol} (${ca}) from ${author}`);
+    await send(`🐦 <b>[CT WHALE / ALPHA CA DETECTED]</b>\n• Token: <b>$${symbol}</b>\n• CA: <code>${ca}</code>\n• Source: <b>${author}</b>\n• Post: <i>${tweetSnippet.slice(0, 140)}</i>\n• Triggering instant automated position entry...`).catch(() => {});
 
     // Execute direct position buy
     const res = await maybeAutoLp(
@@ -86,13 +99,13 @@ export async function processTwitterCaCandidate(
         onchainBackPct: 100,
       },
       {
-        llm: { score: 88, action: "ape", summary: `High conviction official ecosystem launch by ${author}` },
+        llm: { score: 90, action: "ape", summary: `High conviction CT Alpha / Whale call by ${author}` },
         gmgn: null,
       }
     );
 
     if (res?.opened) {
-      log.info(`[Poke AI] Successfully took position in ${symbol} (${ca}) via Twitter alert!`);
+      log.info(`[Poke AI] Successfully took position in ${symbol} (${ca}) via CT Whale alert!`);
       return true;
     }
     return false;
@@ -127,15 +140,15 @@ export async function sendPokeMessage(message: string): Promise<string> {
   }
 }
 
-/** Trigger Poke AI subagents to scan Twitter/X for new Robinhood meme posts and parse CAs */
+/** Trigger Poke AI subagents to scan Twitter/X for all CT Big Accounts & Robinhood memes */
 export async function scanTwitterRobinhoodMemes(): Promise<void> {
-  const prompt = `Search the latest Twitter/X posts from these 40 Robinhood Chain ecosystem accounts: ${ALL_ACCOUNTS.join(", ")}. Return any newly deployed contract addresses (0x...), token tickers, and launch announcements.`;
+  const prompt = `Search live Twitter/X posts from all top Crypto Twitter (CT) big accounts, whales, and Robinhood leaders (${ALL_ACCOUNTS.length} accounts including: ${ALL_ACCOUNTS.slice(0, 30).join(", ")}...). Find any newly announced Robinhood Chain contract addresses (0x...), meme tickers, and token drops.`;
   const responseText = await sendPokeMessage(prompt);
 
   if (responseText) {
     const cas = extractCasFromText(responseText);
     for (const ca of cas) {
-      void processTwitterCaCandidate(ca, "Poke AI Subagent Twitter Monitor", responseText);
+      void processTwitterCaCandidate(ca, "CT Big Account / Poke AI Subagent", responseText);
     }
   }
 }
@@ -145,7 +158,7 @@ let pokeInterval: NodeJS.Timeout | null = null;
 /** Start automated background subagent polling loop (every 60s) */
 export function startPokeSubagentWatcher(): void {
   if (pokeInterval) return;
-  log.info(`[Poke AI] Started Twitter & Subagent Watcher for ${ALL_ACCOUNTS.length} Robinhood ecosystem accounts (60s loop)`);
+  log.info(`[Poke AI] Started Subagent Watcher for ${ALL_ACCOUNTS.length} CT Big Accounts & Ecosystem Leaders (60s loop)`);
   void scanTwitterRobinhoodMemes();
   pokeInterval = setInterval(() => {
     void scanTwitterRobinhoodMemes();
