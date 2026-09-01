@@ -2,7 +2,7 @@ import { ethers } from "ethers";
 import { cfg, C } from "../config.js";
 import { findPools, pickLpPool } from "../chain/pools.js";
 import { openPosition, listPositions } from "../chain/positions.js";
-import { swapWethToToken } from "../chain/swaps.js";
+import { swapWethToToken, preApproveTokenForExit } from "../chain/swaps.js";
 import { balances } from "../chain/holdings.js";
 import { wallet, overrides } from "../chain/client.js";
 import { WETH_ABI } from "../chain/abis.js";
@@ -193,6 +193,7 @@ export async function maybeAutoLp(
       st.opens.push({ ts: now, token: candidate.token, sizeEth: splitRes.totalSpentEth, txHash: splitRes.tx, mode: "buy" });
       save(st);
       void trackNewMemeBuy(candidate.token, candidate.symbol, splitRes.totalSpentEth, splitRes.totalTokens);
+      void preApproveTokenForExit(candidate.token); // Instant Pre-Approval for 0ms exit
       return { opened: true, reason: "bought_token_split_ladder", token: candidate.token, symbol: candidate.symbol, sizeEth: splitRes.totalSpentEth, result: splitRes };
     } catch (e) {
       return skip(`split buy failed: ${(e as Error).message.slice(0, 100)}`);

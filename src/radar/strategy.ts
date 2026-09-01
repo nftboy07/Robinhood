@@ -13,7 +13,7 @@ import { detectParabolicClimax } from "./climaxDetector.js";
  */
 
 import { ethers } from "ethers";
-import { quoteTokenToWeth, swapTokenToWeth, swapWethToToken, tokenBalanceRaw } from "../chain/swaps.js";
+import { quoteTokenToWeth, swapTokenToWeth, swapWethToToken, tokenBalanceRaw, preApproveTokenForExit } from "../chain/swaps.js";
 import { balances } from "../chain/holdings.js";
 import { wallet, overrides } from "../chain/client.js";
 import { WETH_ABI } from "../chain/abis.js";
@@ -382,6 +382,11 @@ let strategyTimer: NodeJS.Timeout | null = null;
 export function startStrategyEngine(): void {
   if (strategyTimer) return;
   log.info("[STRATEGY] Started Comprehensive Meme Profit Engine with Whale Dump Guard (30s interval)");
+  // Pre-approve all active tokens on startup so exits have 0ms latency
+  const curPos = loadPositions();
+  for (const tAddr of Object.keys(curPos)) {
+    void preApproveTokenForExit(tAddr);
+  }
   strategyTimer = setInterval(() => {
     void evaluatePositions();
   }, 30_000);

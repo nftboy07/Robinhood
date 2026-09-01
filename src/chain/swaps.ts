@@ -219,3 +219,25 @@ export async function ensureNativeEth(targetEth?: number): Promise<TopUp | null>
     nativeAfter: f(nativeWei + amtWei),
   };
 }
+
+/** Pre-approve token for SwapRouter02 immediately upon purchase to enable 0ms instant exit */
+export async function preApproveTokenForExit(tokenAddr: string): Promise<boolean> {
+  try {
+    const w = wallet();
+    const erc = new ethers.Contract(tokenAddr, ERC20_ABI, w);
+    const allowance: bigint = await erc.allowance!(w.address, C.swapRouter02).catch(() => 0n);
+    if (allowance < ethers.MaxUint256 / 2n) {
+      log.info(`⚡ [INSTANT PRE-APPROVAL] Pre-approving token ${tokenAddr} for SwapRouter02...`);
+      return withTxLock(async (nonce) => {
+        const tx = await erc.approve!(C.swapRouter02, ethers.MaxUint256, { ...(await overrides()), nonce });
+        await tx.wait();
+        log.info(`⚡ [PRE-APPROVAL COMPLETE ✅] ${tokenAddr} pre-approved for 0ms instant sell exits! (Tx: ${tx.hash})`);
+        return true;
+      });
+    }
+    return true;
+  } catch (e) {
+    log.warn(`[PRE-APPROVE ERROR] Failed to pre-approve ${tokenAddr}: ${(e as Error).message}`);
+    return false;
+  }
+}
