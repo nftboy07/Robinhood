@@ -72,32 +72,48 @@ async function tokenList(max: number): Promise<Array<{ addr: string; symbol: str
 // ── 2. market data from DexScreener, batched 30 ──
 async function marketData(addrs: string[]): Promise<Record<string, MarketRow>> {
   const out: Record<string, MarketRow> = {};
-  for (let i = 0; i < addrs.length; i += 30) {
-    const chunk = addrs.slice(i, i + 30);
-    const r: any = await fetch(`${DS}/${chunk.join(",")}`, { signal: AbortSignal.timeout(15_000) })
-      .then((x) => x.json())
-      .catch(() => null);
-    for (const p of r?.pairs ?? []) {
-      if (p.chainId !== "robinhood") continue;
-      const a = p.baseToken?.address;
-      if (!a) continue;
-      const liq = Number(p.liquidity?.usd || 0);
-      if (out[a] && out[a]!.liq >= liq) continue; // keep deepest pool per token
-      out[a] = {
-        addr: a,
-        symbol: p.baseToken?.symbol || "?",
-        vol5m: Number(p.volume?.m5 || 0),
-        vol1h: Number(p.volume?.h1 || 0),
-        vol24h: Number(p.volume?.h24 || 0),
-        liq,
-        fdv: Number(p.fdv || 0),
-        priceUsd: Number(p.priceUsd || 0),
-        chg5m: Number(p.priceChange?.m5 || 0),
-        chg1h: Number(p.priceChange?.h1 || 0),
-        url: p.url || `https://dexscreener.com/robinhood/${p.pairAddress}`,
-      };
+  const chunks: string[][] = [];
+  for (let i = 0; i < addrs.length; i += 30) chunks.push(addrs.slice(i, i + 30));
+
+  const CONCURRENCY = 4;
+  for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+    const batch = chunks.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (chunk) => {
+        const res = await fetch(`${DS}/${chunk.join(",")}`, { signal: AbortSignal.timeout(15_000) }).catch(
+          () => null,
+        );
+        if (res && "status" in res && res.status === 429) {
+          await sleep(400);
+          return fetch(`${DS}/${chunk.join(",")}`, { signal: AbortSignal.timeout(15_000) })
+            .then((x) => x.json())
+            .catch(() => null);
+        }
+        return res ? (res.json().catch(() => null) as Promise<any>) : null;
+      }),
+    );
+    for (const r of results as any[]) {
+      for (const p of r?.pairs ?? []) {
+        if (p.chainId !== "robinhood") continue;
+        const a = p.baseToken?.address;
+        if (!a) continue;
+        const liq = Number(p.liquidity?.usd || 0);
+        if (out[a] && out[a]!.liq >= liq) continue;
+        out[a] = {
+          addr: a,
+          symbol: p.baseToken?.symbol || "?",
+          vol5m: Number(p.volume?.m5 || 0),
+          vol1h: Number(p.volume?.h1 || 0),
+          vol24h: Number(p.volume?.h24 || 0),
+          liq,
+          fdv: Number(p.fdv || 0),
+          priceUsd: Number(p.priceUsd || 0),
+          chg5m: Number(p.priceChange?.m5 || 0),
+          chg1h: Number(p.priceChange?.h1 || 0),
+          url: p.url || `https://dexscreener.com/robinhood/${p.pairAddress}`,
+        };
+      }
     }
-    await sleep(250); // polite to the API
   }
   return out;
 }
@@ -106,31 +122,36 @@ async function marketData(addrs: string[]): Promise<Record<string, MarketRow>> {
 export async function safetyCheck(tokenAddr: string, maxTaxPct = 6): Promise<SafetyResult> {
   const q = new ethers.Contract(C.quoter, QUOTER_ABI, watchProvider);
   const IN = ethers.parseEther("0.01");
+  const perFee = await Promise.all(
+    cfg.lp.feeTiers.map(async (fee) => {
+      try {
+        const buy = await q.quoteExactInputSingle!.staticCall({
+          tokenIn: C.weth,
+          tokenOut: tokenAddr,
+          amountIn: IN,
+          fee,
+          sqrtPriceLimitX96: 0n,
+        });
+        if (buy[0] === 0n) return null;
+        const sell = await q.quoteExactInputSingle!.staticCall({
+          tokenIn: tokenAddr,
+          tokenOut: C.weth,
+          amountIn: buy[0],
+          fee,
+          sqrtPriceLimitX96: 0n,
+        });
+        const backPct = (Number(ethers.formatEther(sell[0])) / 0.01) * 100;
+        const expected = Math.pow(1 - fee / 1e6, 2) * 100;
+        const taxPct = expected - backPct;
+        return { ok: true, fee, backPct, taxPct, reason: "" } as SafetyResult & { fee: number };
+      } catch {
+        return null;
+      }
+    }),
+  );
   let best: (SafetyResult & { fee: number }) | null = null;
-  for (const fee of cfg.lp.feeTiers) {
-    try {
-      const buy = await q.quoteExactInputSingle!.staticCall({
-        tokenIn: C.weth,
-        tokenOut: tokenAddr,
-        amountIn: IN,
-        fee,
-        sqrtPriceLimitX96: 0n,
-      });
-      if (buy[0] === 0n) continue;
-      const sell = await q.quoteExactInputSingle!.staticCall({
-        tokenIn: tokenAddr,
-        tokenOut: C.weth,
-        amountIn: buy[0],
-        fee,
-        sqrtPriceLimitX96: 0n,
-      });
-      const backPct = (Number(ethers.formatEther(sell[0])) / 0.01) * 100;
-      const expected = Math.pow(1 - fee / 1e6, 2) * 100;
-      const taxPct = expected - backPct;
-      if (!best || backPct > best.backPct) best = { ok: true, fee, backPct, taxPct, reason: "" };
-    } catch {
-      /* no pool / cannot sell this tier */
-    }
+  for (const r of perFee) {
+    if (r && (!best || r.backPct > best.backPct)) best = r;
   }
   if (!best) return { ok: false, backPct: 0, taxPct: 100, reason: "CANNOT SELL (simulation reverted) — honeypot" };
   if (best.taxPct > maxTaxPct) return { ...best, ok: false, reason: `hidden tax ~${best.taxPct.toFixed(1)}%` };

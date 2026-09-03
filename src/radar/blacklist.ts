@@ -1,6 +1,6 @@
 /**
  * Persistent Blacklist & Honeypot Registry
- * Caches confirmed honeypots and high-tax scam tokens to skip them instantly (0ms latency).
+ * In-memory cache for 0ms isBlacklisted checks on the hot path.
  */
 import { dataPath, readJson, writeJson } from "../util/files.js";
 import { logger } from "../util/log.js";
@@ -16,17 +16,21 @@ interface BlacklistStore {
   };
 }
 
+let cache: BlacklistStore | null = null;
+
 function load(): BlacklistStore {
-  return readJson<BlacklistStore>(BLACKLIST_FILE, {});
+  if (cache) return cache;
+  cache = readJson<BlacklistStore>(BLACKLIST_FILE, {});
+  return cache;
 }
 
 function save(b: BlacklistStore): void {
+  cache = b;
   writeJson(BLACKLIST_FILE, b);
 }
 
 export function isBlacklisted(tokenAddr: string): boolean {
-  const b = load();
-  return !!b[tokenAddr.toLowerCase()];
+  return !!load()[tokenAddr.toLowerCase()];
 }
 
 export function addToBlacklist(tokenAddr: string, symbol: string, reason: string): void {

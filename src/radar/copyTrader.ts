@@ -22,50 +22,59 @@ export const SMART_MONEY_WALLETS = [
   "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"  // Core Factory
 ];
 
-function loadSeenTxs(): Record<string, number> {
-  return readJson<Record<string, number>>(SEEN_TX_FILE, {});
-}
+let lastSyncedBlock = 0;
+let isPolling = false;
+let seenMem: Record<string, number> = readJson<Record<string, number>>(SEEN_TX_FILE, {});
 
-function saveSeenTxs(s: Record<string, number>): void {
-  writeJson(SEEN_TX_FILE, s);
-}
-
-/** Check recent blocks for smart money token buys */
 export async function pollSmartMoneyBuys(): Promise<void> {
-  const seen = loadSeenTxs();
+  if (isPolling) return;
+  isPolling = true;
   try {
-    const latestBlock = await provider.getBlockNumber();
-    const block = await provider.getBlock(latestBlock, true);
-    if (!block || !block.prefetchedTransactions) return;
+    const tip = await provider.getBlockNumber();
+    if (lastSyncedBlock === 0) lastSyncedBlock = tip - 1;
+    if (tip <= lastSyncedBlock) return;
 
-    for (const tx of block.prefetchedTransactions) {
-      if (seen[tx.hash]) continue;
-      seen[tx.hash] = Date.now();
+    const fromB = lastSyncedBlock + 1;
+    const toB = Math.min(tip, fromB + 8);
 
-      const from = tx.from?.toLowerCase();
-      if (SMART_MONEY_WALLETS.some((w) => w.toLowerCase() === from)) {
-        log.info(`🐋 [SMART MONEY TX DETECTED] From: ${from} (Tx: ${tx.hash})`);
-        
-        // If contract creation or router swap
+    for (let b = fromB; b <= toB; b++) {
+      const block = await provider.getBlock(b, true);
+      if (!block?.prefetchedTransactions) continue;
+
+      for (const tx of block.prefetchedTransactions) {
+        if (seenMem[tx.hash]) continue;
+        seenMem[tx.hash] = Date.now();
+
+        const from = tx.from?.toLowerCase();
+        if (!SMART_MONEY_WALLETS.some((w) => w.toLowerCase() === from)) continue;
+
+        log.info(`🐋 [SMART MONEY TX] From: ${from} (Tx: ${tx.hash})`);
         const targetToken = tx.to;
-        if (targetToken && !isBlacklisted(targetToken)) {
+        if (!targetToken || isBlacklisted(targetToken)) continue;
+
+        void maybeAutoLp(
+          { token: targetToken, symbol: targetToken.slice(0, 8), source: "poke-ai", onchainBackPct: 100 },
+          { llm: { score: 95, action: "ape", summary: `Mirroring Smart Money buy from ${from}` }, gmgn: null },
+        );
+
+        void (async () => {
           const contract = new ethers.Contract(targetToken, ERC20_ABI, provider);
           const symbol: string = await contract.symbol!().catch(() => "");
           if (symbol) {
-            log.info(`🐋 [COPY-TRADE SIGNAL] Smart Money ${from.slice(0, 8)}... bought $${symbol}!`);
-            await send(`🐋 <b>[WHALE COPY-TRADE SIGNAL]</b>\n• Smart Wallet: <code>${from}</code>\n• Token: <b>$${symbol}</b>\n• CA: <code>${targetToken}</code>\n• Executing automated mirror entry...`).catch(() => {});
-
-            void maybeAutoLp(
-              { token: targetToken, symbol, source: "poke-ai", onchainBackPct: 100 },
-              { llm: { score: 95, action: "ape", summary: `Mirroring Smart Money buy from ${from}` }, gmgn: null }
-            );
+            void send(
+              `🐋 <b>[WHALE COPY-TRADE SIGNAL]</b>\n• Smart Wallet: <code>${from}</code>\n• Token: <b>$${symbol}</b>\n• CA: <code>${targetToken}</code>`,
+            ).catch(() => {});
           }
-        }
+        })();
       }
     }
-    saveSeenTxs(seen);
+
+    lastSyncedBlock = toB;
+    writeJson(SEEN_TX_FILE, seenMem);
   } catch {
-    /* block poll error */
+    /* keep cursor */
+  } finally {
+    isPolling = false;
   }
 }
 

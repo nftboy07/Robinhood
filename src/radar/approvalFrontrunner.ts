@@ -1,87 +1,71 @@
 /**
- * Whale Sell Approval Frontrunner & Dump Escape Engine
- * 
- * Detects when large holders or creators submit `approve` transactions for SwapRouter02,
- * indicating an imminent massive dump, and instantly frontruns them with priority gas tips!
+ * Whale Sell Approval Frontrunner — block-poll FALLBACK only.
+ * Primary race path is sequencer feed (see FeedMonitor / panicExitToken).
  */
-
-import { ethers } from "ethers";
 import { provider } from "../chain/client.js";
-import { swapTokenToWeth, tokenBalanceRaw } from "../chain/swaps.js";
 import { C } from "../config.js";
-import { dataPath, readJson, writeJson } from "../util/files.js";
-import { send } from "../telegram/tg.js";
+import { getHeldTokenKeys, panicExitToken } from "./strategy.js";
 import { logger } from "../util/log.js";
 
 const log = logger("approval-frontrunner");
-const POSITIONS_FILE = dataPath("meme-positions.json");
 
-const ROUTERS = [
+const ROUTERS = new Set([
   C.swapRouter02.toLowerCase(),
-  "0xca143ce32fe78f1f7019d7d551a6402fc5350c73".toLowerCase(), // Sherwood Router
-  "0x1f7d7550b1b028f7571e69a784071f0205fd2efa".toLowerCase(), // Pons Router
-];
+  (C.universalRouter || "").toLowerCase(),
+  "0xca143ce32fe78f1f7019d7d551a6402fc5350c73".toLowerCase(),
+  "0x8876789976decbfcbbbe364623c63652db8c0904".toLowerCase(),
+  "0x1f7d7550b1b028f7571e69a784071f0205fd2efa".toLowerCase(),
+].filter(Boolean));
 
-const APPROVE_SIG = "0x095ea7b3"; // approve(address,uint256)
+const APPROVE_SIG = "0x095ea7b3";
 
-function loadPositions(): Record<string, any> {
-  return readJson<Record<string, any>>(POSITIONS_FILE, {});
-}
+let lastSyncedBlock = 0;
+let isPolling = false;
+const exiting = new Set<string>();
 
-function savePositions(p: Record<string, any>): void {
-  writeJson(POSITIONS_FILE, p);
-}
-
-let lastScannedBlock = 0;
-
-/** Scans latest block for whale approve transactions on our held tokens */
 export async function pollWhaleApprovals(): Promise<void> {
+  if (isPolling) return;
+  isPolling = true;
   try {
-    const latestBlock = await provider.getBlockNumber();
-    if (lastScannedBlock === 0) lastScannedBlock = latestBlock - 1;
-    if (latestBlock <= lastScannedBlock) return;
+    const tip = await provider.getBlockNumber();
+    if (lastSyncedBlock === 0) lastSyncedBlock = tip - 1;
+    if (tip <= lastSyncedBlock) return;
 
-    const block = await provider.getBlock(latestBlock, true);
-    lastScannedBlock = latestBlock;
-    if (!block || !block.prefetchedTransactions) return;
+    const held = new Set(getHeldTokenKeys().map((k) => k.toLowerCase()));
+    if (held.size === 0) {
+      lastSyncedBlock = tip;
+      return;
+    }
 
-    const positions = loadPositions();
-    const heldTokens = Object.keys(positions).map(k => k.toLowerCase());
-    if (heldTokens.length === 0) return;
+    const fromBlock = lastSyncedBlock + 1;
+    const toBlock = Math.min(tip, fromBlock + 5); // small gap fill
 
-    for (const tx of block.prefetchedTransactions) {
-      const targetToken = tx.to?.toLowerCase();
-      if (!targetToken || !heldTokens.includes(targetToken)) continue;
+    for (let b = fromBlock; b <= toBlock; b++) {
+      const block = await provider.getBlock(b, true);
+      if (!block?.prefetchedTransactions) continue;
 
-      // Check if transaction is an approve call
-      if (tx.data && tx.data.startsWith(APPROVE_SIG)) {
+      for (const tx of block.prefetchedTransactions) {
+        const targetToken = tx.to?.toLowerCase();
+        if (!targetToken || !held.has(targetToken)) continue;
+        if (!tx.data?.startsWith(APPROVE_SIG)) continue;
+
         const spender = ("0x" + tx.data.slice(34, 74)).toLowerCase();
-        
-        // If approving a DEX router to sell tokens
-        if (ROUTERS.includes(spender)) {
-          const approver = tx.from.toLowerCase();
-          const pos = positions[targetToken];
-          if (!pos) continue;
+        if (!ROUTERS.has(spender)) continue;
+        if (exiting.has(targetToken)) continue;
+        exiting.add(targetToken);
 
-          log.warn(`🚨 [WHALE APPROVAL DETECTED] Whale ${approver.slice(0, 8)}... approved $${pos.symbol} for DEX sale! FRONTRUNNING DUMP...`);
-
-          const curBal = await tokenBalanceRaw(pos.token);
-          if (curBal > 0n) {
-            // Frontrun exit with higher priority gas
-            const res = await swapTokenToWeth(pos.token, curBal);
-
-            delete positions[targetToken];
-            savePositions(positions);
-
-            log.info(`⚡ [DUMP ESCAPED ✅] Successfully frontran whale sell on $${pos.symbol}! Banked +${ethers.formatEther(res.amountOut)}Ξ`);
-            
-            await send(`🚨 <b>[WHALE SELL APPROVAL FRONTRUNNED! ⚡] $${pos.symbol}</b>\n• Whale: <code>${approver}</code>\n• Imminent dump detected from DEX approval\n• Frontran whale with 0ms pre-approved exit!\n• Realized: <b>+${ethers.formatEther(res.amountOut)}Ξ</b>\n• 100% Capital Saved Before Dump!`).catch(() => {});
-          }
-        }
+        log.warn(`🚨 [BLOCK-FALLBACK APPROVE] ${targetToken} spender=${spender} from=${tx.from}`);
+        void panicExitToken(targetToken, `mined-approve from ${tx.from?.slice(0, 10)}`).finally(() => {
+          exiting.delete(targetToken);
+        });
       }
     }
+
+    lastSyncedBlock = toBlock;
   } catch (e) {
     log.debug(`Approval scanner poll error: ${(e as Error).message}`);
+  } finally {
+    isPolling = false;
   }
 }
 
@@ -89,8 +73,21 @@ let frontrunTimer: NodeJS.Timeout | null = null;
 
 export function startApprovalFrontrunner(): void {
   if (frontrunTimer) return;
-  log.info(`[APPROVAL-FRONTRUNNER] Started Whale Sell Approval Frontrunner Engine (2s ultra-fast loop)`);
+  log.info(`[APPROVAL-FRONTRUNNER] Block-poll fallback @500ms (primary=sequencer feed)`);
   frontrunTimer = setInterval(() => {
     void pollWhaleApprovals();
-  }, 500); // 2-second ultra-fast block scan
+  }, 500);
+}
+
+/** Shared helpers for feed-side approve decode */
+export function isRouterSpender(spender: string): boolean {
+  return ROUTERS.has(spender.toLowerCase());
+}
+
+export function isApproveCalldata(data: string | undefined | null): boolean {
+  return !!data && data.startsWith(APPROVE_SIG);
+}
+
+export function decodeApproveSpender(data: string): string {
+  return ("0x" + data.slice(34, 74)).toLowerCase();
 }

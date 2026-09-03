@@ -18,11 +18,16 @@ const FACTORY_L = C.factory.toLowerCase();
 const V2_FACTORY_L = (C.v2Factory || "0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f").toLowerCase();
 const WETH_L = C.weth.toLowerCase();
 
+const V4_PM_L = (C.v4PoolManager || "0x8366a39CC670B4001A1121B8F6A443A643e40951").toLowerCase();
+const ZEROHOOD_L = "0x73991a25c818bf1f1128deaab1492d45638de0d3".toLowerCase();
+
 // Known Launchpad Contracts
 const KNOWN_LAUNCHPADS = new Set([
   NPM_L,
   FACTORY_L,
   V2_FACTORY_L,
+  V4_PM_L,
+  ZEROHOOD_L,
   "0x8b40fc20c405d47d725c9723d056a1c6f62bbccf", // O1 v1
   "0x76f0923ac4df0a079a10f628a7bce6426ccd344a", // O1 v2
   "0x411f21283d3e492bc395027329e08f9f4f560ba5", // O1 v3
@@ -61,7 +66,7 @@ export function extractPoolEvents(ftx: FeedTx): PoolEvent[] {
 }
 
 function isContractTarget(to: string): boolean {
-  return to === NPM_L || to === FACTORY_L || to === V2_FACTORY_L;
+  return to === NPM_L || to === FACTORY_L || to === V2_FACTORY_L || to === V4_PM_L || to === ZEROHOOD_L;
 }
 
 function decode(data: string, hash: string, from: string | null, out: PoolEvent[]): void {

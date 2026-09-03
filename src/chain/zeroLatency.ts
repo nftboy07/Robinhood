@@ -1,40 +1,42 @@
 /**
- * Zero-Latency (0ms) Execution & In-Memory Pipeline Engine
+ * Zero-Latency Execution & In-Memory Pipeline Engine
  */
 import { ethers } from "ethers";
-import { provider } from "./client.js";
+import { provider, cacheGasPrice } from "./client.js";
 
-// In-Memory Global Caches (0ms retrieval)
+export { getInstantGasOverrides } from "./client.js";
+
 const ALLOWANCE_CACHE = new Set<string>();
-let CACHED_GAS_PRICE: bigint = 1_000_000_000n;
+const WETH_ROUTER_APPROVED = { ok: false };
 
 /** Continuously pre-warm gas prices every 1.5s in memory */
 export function startGasPrewarmer(): void {
-  setInterval(async () => {
+  const refresh = async () => {
     try {
       const fee = await provider.getFeeData();
-      if (fee.gasPrice) {
-        CACHED_GAS_PRICE = fee.gasPrice * 2n;
-      }
+      if (fee.gasPrice) cacheGasPrice(fee.gasPrice * 3n);
     } catch {
-      /* keep previous cached gas */
+      /* keep previous */
     }
-  }, 1500);
+  };
+  void refresh();
+  setInterval(() => void refresh(), 1500);
 }
 
-/** Get instant 0ms pre-warmed gas overrides */
-export function getInstantGasOverrides(): ethers.Overrides {
-  return { gasPrice: CACHED_GAS_PRICE };
-}
-
-/** Check if token is already known to be approved in 0ms */
 export function isTokenPreApprovedFast(tokenAddr: string): boolean {
   return ALLOWANCE_CACHE.has(tokenAddr.toLowerCase());
 }
 
-/** Record token as approved in local memory */
 export function markTokenApprovedFast(tokenAddr: string): void {
   ALLOWANCE_CACHE.add(tokenAddr.toLowerCase());
+}
+
+export function isWethRouterApprovedFast(): boolean {
+  return WETH_ROUTER_APPROVED.ok;
+}
+
+export function markWethRouterApprovedFast(): void {
+  WETH_ROUTER_APPROVED.ok = true;
 }
 
 const ROUTER_IFACE = new ethers.Interface([

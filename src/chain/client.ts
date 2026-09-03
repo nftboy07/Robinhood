@@ -62,19 +62,32 @@ export function wallet(): ethers.Wallet {
   return _wallet;
 }
 
+let CACHED_GAS_PRICE: bigint = 1_000_000_000n;
+
+export function cacheGasPrice(gp: bigint): void {
+  if (gp > 0n) CACHED_GAS_PRICE = gp;
+}
+
+export function getInstantGasOverrides(): ethers.Overrides {
+  return { gasPrice: CACHED_GAS_PRICE, gasLimit: 350_000n };
+}
+
 /**
- * Gas overrides. Robinhood base fee moves per block; if maxFee is too tight the tx is
- * rejected ("max fee < base fee") and hangs → close/mint never lands. Buffer 3×.
+ * Gas overrides. Prefer in-memory prewarmed gas (0ms); fall back to live feeData.
  */
 export async function overrides(): Promise<ethers.Overrides> {
   if (Number(cfg.gasPriceGwei) > 0) {
-    return { gasPrice: ethers.parseUnits(String(cfg.gasPriceGwei), "gwei") };
+    return { gasPrice: ethers.parseUnits(String(cfg.gasPriceGwei), "gwei"), gasLimit: 350_000n };
   }
+  if (CACHED_GAS_PRICE > 0n) return getInstantGasOverrides();
   try {
     const gp = (await provider.getFeeData()).gasPrice;
-    if (gp) return { gasPrice: gp * 3n };
+    if (gp) {
+      CACHED_GAS_PRICE = gp * 3n;
+      return { gasPrice: CACHED_GAS_PRICE, gasLimit: 350_000n };
+    }
   } catch {
-    /* fall through to node default */
+    /* fall through */
   }
-  return {};
+  return { gasLimit: 350_000n };
 }

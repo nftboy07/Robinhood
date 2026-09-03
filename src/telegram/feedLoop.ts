@@ -13,7 +13,9 @@ export function isFeedOn(): boolean {
 }
 
 export async function startFeed(): Promise<void> {
-  if (monitor || !cfg.feed.enabled) return;
+  if (monitor) return;
+  // Always start when auto-LP is on so whale-exit feed path is live
+  if (!cfg.feed.enabled && !cfg.autoLp.enabled) return;
   monitor = new FeedMonitor({
     onNewToken: (ev) => void handleNewToken(ev).catch(() => {}),
     onOutOfRange: (ev) => void notifyOutOfRange(ev).catch(() => {}),

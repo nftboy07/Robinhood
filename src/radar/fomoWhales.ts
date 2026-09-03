@@ -1,8 +1,7 @@
 /**
- * FOMO.family & Pons.family Whale Radar & Copy-Trading Engine
- * Tracks whale accumulation on FOMO.family bonding curves and auto-mirrors high-value entries.
+ * FOMO.family & Pons.family Whale Radar
+ * Cursor-based block scan; skip receipt wait when possible; snipe-first.
  */
-
 import { ethers } from "ethers";
 import { provider } from "../chain/client.js";
 import { ERC20_ABI } from "../chain/abis.js";
@@ -16,75 +15,91 @@ const log = logger("fomo-whales");
 const SEEN_FOMO_FILE = dataPath("fomo-seen-whales.json");
 
 export const FOMO_FAMILY_CONTRACTS = [
-  "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f", // FOMO.fund / Pons Factory
-  "0x1f7d7550b1b028f7571e69a784071f0205fd2efa", // Pons Curve Router
+  "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f",
+  "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
 ];
 
-function loadSeen(): Record<string, number> {
-  const s = readJson<Record<string, number>>(SEEN_FOMO_FILE, {});
+let seenMem: Record<string, number> = readJson(SEEN_FOMO_FILE, {});
+let lastSyncedBlock = 0;
+let isPolling = false;
+
+function markSeen(k: string): void {
+  seenMem[k] = Date.now();
+}
+
+function flushSeen(): void {
   const now = Date.now();
   const pruned: Record<string, number> = {};
-  for (const k of Object.keys(s)) {
-    if (now - s[k] < 7200_000) pruned[k] = s[k]; // 2h sliding window TTL
+  for (const k of Object.keys(seenMem)) {
+    if (now - seenMem[k]! < 7200_000) pruned[k] = seenMem[k]!;
   }
-  return pruned;
+  seenMem = pruned;
+  writeJson(SEEN_FOMO_FILE, seenMem);
 }
 
-function saveSeen(s: Record<string, number>): void {
-  writeJson(SEEN_FOMO_FILE, s);
-}
-
-/** Poll latest blocks for large FOMO.family whale purchases */
 export async function pollFomoWhaleActivity(): Promise<void> {
-  const seen = loadSeen();
+  if (isPolling) return;
+  isPolling = true;
   try {
-    const latestBlock = await provider.getBlockNumber();
-    const block = await provider.getBlock(latestBlock, true);
-    if (!block || !block.prefetchedTransactions) return;
+    const tip = await provider.getBlockNumber();
+    if (lastSyncedBlock === 0) lastSyncedBlock = tip - 1;
+    if (tip <= lastSyncedBlock) return;
 
-    for (const tx of block.prefetchedTransactions) {
-      if (seen[tx.hash]) continue;
-      seen[tx.hash] = Date.now();
+    const from = lastSyncedBlock + 1;
+    const to = Math.min(tip, from + 8);
 
-      const to = tx.to?.toLowerCase();
-      if (to && FOMO_FAMILY_CONTRACTS.some(c => c.toLowerCase() === to)) {
+    for (let b = from; b <= to; b++) {
+      const block = await provider.getBlock(b, true);
+      if (!block?.prefetchedTransactions) continue;
+
+      for (const tx of block.prefetchedTransactions) {
+        if (seenMem[tx.hash]) continue;
+        markSeen(tx.hash);
+
+        const toAddr = tx.to?.toLowerCase();
+        if (!toAddr || !FOMO_FAMILY_CONTRACTS.some((c) => c.toLowerCase() === toAddr)) continue;
+
         const valEth = Number(ethers.formatEther(tx.value || 0n));
         const sender = tx.from?.toLowerCase() || "";
+        if (valEth < 0.005 && (tx.data?.length ?? 0) <= 10) continue;
 
-        // If transaction has ETH value or represents a curve buy
-        if (valEth >= 0.005 || tx.data.length > 10) {
-          log.info(`🐋 [FOMO.FAMILY WHALE BUY] From: ${sender.slice(0, 8)}... | Value: ${valEth.toFixed(4)}Ξ (Tx: ${tx.hash})`);
+        log.info(`🐋 [FOMO WHALE] ${sender.slice(0, 8)}… ${valEth.toFixed(4)}Ξ tx=${tx.hash}`);
 
-          // Attempt to extract token from tx or contract logs
+        // Prefer calldata token hints; receipt only as fallback (async)
+        void (async () => {
           const rc = await provider.getTransactionReceipt(tx.hash).catch(() => null);
-          if (rc) {
-            for (const lg of rc.logs) {
-              const tokenCandidate = lg.address;
-              if (tokenCandidate && !isBlacklisted(tokenCandidate) && !seen[tokenCandidate.toLowerCase()]) {
-                seen[tokenCandidate.toLowerCase()] = Date.now();
+          if (!rc) return;
+          for (const lg of rc.logs) {
+            const tokenCandidate = lg.address;
+            if (!tokenCandidate || isBlacklisted(tokenCandidate)) continue;
+            const key = tokenCandidate.toLowerCase();
+            if (seenMem[key]) continue;
+            markSeen(key);
 
-                const erc = new ethers.Contract(tokenCandidate, ERC20_ABI, provider);
-                const sym = await erc.symbol!().catch(() => "");
-                if (sym && sym !== "WETH") {
-                  log.info(`🎯 [FOMO.FAMILY GEM DETECTED] Whale bought $${sym} on FOMO curve! Mirroring...`);
-                  
-                  await send(`🐋 <b>[FOMO.FAMILY WHALE BUY DETECTED]</b>\n• Platform: <b>FOMO.fund / Pons Family</b>\n• Whale: <code>${sender}</code>\n• Size: <b>${valEth > 0 ? valEth.toFixed(3) + 'Ξ' : 'Bonding Curve Buy'}</b>\n• Token: <b>$${sym}</b>\n• CA: <code>${tokenCandidate}</code>\n• Executing automated 3-Tranche Snipe...`).catch(() => {});
+            const erc = new ethers.Contract(tokenCandidate, ERC20_ABI, provider);
+            const sym = await erc.symbol!().catch(() => "");
+            if (!sym || sym === "WETH") continue;
 
-                  void maybeAutoLp(
-                    { token: tokenCandidate, symbol: sym, source: "feed-new", onchainBackPct: 100 },
-                    { llm: { score: 96, action: "ape", summary: `FOMO.family Whale Buy from ${sender}` }, gmgn: null }
-                  );
-                  break;
-                }
-              }
-            }
+            void maybeAutoLp(
+              { token: tokenCandidate, symbol: sym, source: "feed-new", onchainBackPct: 100 },
+              { llm: { score: 96, action: "ape", summary: `FOMO.family Whale Buy from ${sender}` }, gmgn: null },
+            );
+            void send(
+              `🐋 <b>[FOMO WHALE BUY]</b>\n• Whale: <code>${sender}</code>\n• Size: <b>${valEth > 0 ? valEth.toFixed(3) + "Ξ" : "curve"}</b>\n• Token: <b>$${sym}</b>\n• CA: <code>${tokenCandidate}</code>`,
+            ).catch(() => {});
+            break;
           }
-        }
+          flushSeen();
+        })();
       }
     }
-    saveSeen(seen);
+
+    lastSyncedBlock = to;
+    flushSeen();
   } catch {
-    /* block poll error */
+    /* keep cursor */
+  } finally {
+    isPolling = false;
   }
 }
 
@@ -92,8 +107,8 @@ let fomoTimer: NodeJS.Timeout | null = null;
 
 export function startFomoWhaleRadar(): void {
   if (fomoTimer) return;
-  log.info(`[FOMO-WHALES] Started FOMO.family & Pons Family Whale Radar (8s loop)`);
+  log.info(`[FOMO-WHALES] Whale radar @1.5s (cursor-safe)`);
   fomoTimer = setInterval(() => {
     void pollFomoWhaleActivity();
-  }, 1500); // Fast 8-second polling
+  }, 1500);
 }

@@ -58,8 +58,8 @@
   "radar": {
     "enabled": true,
     "useGmgn": true,
-    "attachToNewToken": true,
-    "attachToWatch": true
+    "attachToNewToken": false,
+    "attachToWatch": false
   },
   "autoLp": {
     "enabled": true,

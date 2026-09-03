@@ -17,8 +17,9 @@ import { logger } from "../util/log.js";
 const log = logger("feed");
 
 const DEFAULT_URL = "wss://feed.mainnet.chain.robinhood.com/feed";
-const STALL_MS = 30_000; // no message this long → assume dead, reconnect
-const MAX_BACKOFF = 30_000;
+const STALL_MS = 8_000; // no message this long → assume dead, reconnect
+const MAX_BACKOFF = 4_000;
+const MIN_BACKOFF = 250;
 
 export interface FeedListenerOpts {
   /** Called with the decoded signed txs of every frame. */
@@ -30,7 +31,7 @@ export interface FeedListenerOpts {
 
 export class FeedListener {
   private ws: WebSocket | null = null;
-  private backoff = 1000;
+  private backoff = MIN_BACKOFF;
   private stallTimer: ReturnType<typeof setInterval> | null = null;
   private lastMsg = 0;
   private stopped = false;
@@ -53,7 +54,7 @@ export class FeedListener {
           log.warn("stall — reconnect");
           this.ws?.terminate();
         }
-      }, 10_000);
+      }, 3_000);
     }
   }
 
@@ -87,7 +88,7 @@ export class FeedListener {
     this.ws = ws;
 
     ws.on("open", () => {
-      this.backoff = 1000;
+      this.backoff = MIN_BACKOFF;
       this.lastMsg = Date.now();
       log.info("connected (101)");
     });
@@ -108,7 +109,7 @@ export class FeedListener {
     ws.on("close", () => {
       this.ws = null;
       if (this.stopped) return;
-      const wait = this.backoff;
+      const wait = Math.max(MIN_BACKOFF, this.backoff);
       this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF);
       log.warn(`disconnected — reconnect in ${wait}ms`);
       setTimeout(() => this.connect(), wait);

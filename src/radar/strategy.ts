@@ -14,7 +14,7 @@ import { detectParabolicClimax } from "./climaxDetector.js";
  */
 
 import { ethers } from "ethers";
-import { quoteTokenToWeth, swapTokenToWeth, swapWethToToken, tokenBalanceRaw, preApproveTokenForExit } from "../chain/swaps.js";
+import { quoteTokenToWeth, swapTokenToWeth, swapTokenToWethFast, swapWethToToken, tokenBalanceRaw, preApproveTokenForExit } from "../chain/swaps.js";
 import { balances } from "../chain/holdings.js";
 import { wallet, overrides } from "../chain/client.js";
 import { WETH_ABI } from "../chain/abis.js";
@@ -51,12 +51,62 @@ interface PositionsMap {
   [tokenAddr: string]: MemePosition;
 }
 
+let positionsCache: PositionsMap | null = null;
+
 function loadPositions(): PositionsMap {
-  return readJson<PositionsMap>(POSITIONS_FILE, {});
+  if (!positionsCache) positionsCache = readJson<PositionsMap>(POSITIONS_FILE, {});
+  return positionsCache;
 }
 
 function savePositions(p: PositionsMap): void {
+  positionsCache = p;
   writeJson(POSITIONS_FILE, p);
+}
+
+/** In-memory held token set for feed/approval hot paths (0ms). */
+export function getHeldTokenKeys(): string[] {
+  return Object.keys(loadPositions());
+}
+
+export function getHeldPosition(tokenLower: string): MemePosition | undefined {
+  return loadPositions()[tokenLower.toLowerCase()];
+}
+
+export function countOpenMemePositions(): number {
+  return Object.keys(loadPositions()).length;
+}
+
+export function removeHeldPosition(tokenLower: string): void {
+  const p = loadPositions();
+  delete p[tokenLower.toLowerCase()];
+  savePositions(p);
+}
+
+/** Panic exit a held meme token via fast sell (feed / approval frontrunner). */
+export async function panicExitToken(
+  tokenAddr: string,
+  reason: string,
+): Promise<{ ok: boolean; tx?: string; symbol?: string }> {
+  const key = tokenAddr.toLowerCase();
+  const pos = getHeldPosition(key);
+  if (!pos) return { ok: false };
+  const curBal = await tokenBalanceRaw(pos.token);
+  if (curBal <= 0n) {
+    removeHeldPosition(key);
+    return { ok: false };
+  }
+  try {
+    const res = await swapTokenToWethFast(pos.token, curBal);
+    removeHeldPosition(key);
+    log.warn(`⚡ [PANIC EXIT] $${pos.symbol} reason=${reason} tx=${res.tx}`);
+    void send(
+      `🚨 <b>[PANIC EXIT ⚡] $${pos.symbol}</b>\n• Reason: ${reason}\n• Tx: <code>${res.tx}</code>\n• Capital exit broadcast (fire-and-forget)`,
+    ).catch(() => {});
+    return { ok: true, tx: res.tx, symbol: pos.symbol };
+  } catch (e) {
+    log.warn(`[PANIC EXIT FAIL] ${pos.symbol}: ${(e as Error).message}`);
+    return { ok: false, symbol: pos.symbol };
+  }
 }
 
 /** Record a new token purchase into active strategy tracking */
@@ -98,9 +148,9 @@ export async function trackNewMemeBuy(
   await send(`🎯 <b>[STRATEGY ENTERED] ${symbol}</b>\n• Total Size: ${entryWeth.toFixed(4)}Ξ\n• Tokens: ${tokensReceived.toString()}\n• Strategies: Split DCA + 5-Stage TP + Whale Dump Exit + Stale Token Killer`).catch(() => {});
 }
 
-/** Check if large whale dump or insider concentration risk is detected */
+/** Check if large whale dump or insider concentration risk is detected (salvage only). */
 async function checkWhaleDumpRisk(_tokenAddr: string, currentQuoteWeth: number, lastLiquidityWeth: number): Promise<boolean> {
-  // 1. Rapid liquidity pull (>18% drop)
+  // Liquidity already damaged — salvage, not a true race (feed approve handles intent).
   if (lastLiquidityWeth > 0 && currentQuoteWeth < lastLiquidityWeth * 0.82) {
     return true;
   }
@@ -135,11 +185,11 @@ export async function evaluatePositions(): Promise<void> {
       if (quote.weth > 0) {
         const isWhaleDump = await checkWhaleDumpRisk(pos.token, quote.weth, pos.lastLiquidityWeth);
         if (isWhaleDump) {
-          log.warn(`🚨 [WHALE DUMP / RUG DETECTED] ${pos.symbol} liquidity dropped from ${pos.lastLiquidityWeth.toFixed(4)}Ξ → ${quote.weth.toFixed(4)}Ξ! Frontrunning dump...`);
-          const res = await swapTokenToWeth(pos.token, curBal, quote.fee);
+          log.warn(`🚨 [LIQ SALVAGE] ${pos.symbol} liquidity dropped ${pos.lastLiquidityWeth.toFixed(4)}Ξ → ${quote.weth.toFixed(4)}Ξ`);
+          const res = await swapTokenToWethFast(pos.token, curBal, quote.fee);
           delete positions[key];
           savePositions(positions);
-          await send(`🚨 <b>[WHALE DUMP EARLY EXIT] ${pos.symbol}</b>\n• Detected insider dump / liquidity drain!\n• Frontran dump and recovered: ${ethers.formatEther(res.amountOut)}Ξ`).catch(() => {});
+          void send(`🚨 <b>[LIQ SALVAGE EXIT] ${pos.symbol}</b>\n• Liquidity drain salvage\n• Tx: <code>${res.tx}</code>`).catch(() => {});
           continue;
         }
         pos.lastLiquidityWeth = quote.weth;
@@ -391,7 +441,7 @@ let strategyTimer: NodeJS.Timeout | null = null;
 /** Start automated strategy execution loop (runs every 30s) */
 export function startStrategyEngine(): void {
   if (strategyTimer) return;
-  log.info("[STRATEGY] Started Comprehensive Meme Profit Engine with Whale Dump Guard (30s interval)");
+  log.info("[STRATEGY] Meme Profit Engine (10s) + salvage dump guard; feed handles approve race");
   // Pre-approve all active tokens on startup so exits have 0ms latency
   const curPos = loadPositions();
   for (const tAddr of Object.keys(curPos)) {

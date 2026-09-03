@@ -1,16 +1,34 @@
 /**
- * Quotes + swaps with 0ms pre-approval and atomic nonce management.
+ * Quotes + swaps with cached approvals, fire-and-forget broadcast, and panic exits.
+ * Receipt waits happen OUTSIDE the tx mutex so emergency sells are not blocked.
  */
 import { ethers } from "ethers";
 import { withTxLock } from "./txMutex.js";
-import { isTokenPreApprovedFast, markTokenApprovedFast } from "./zeroLatency.js";
+import {
+  isTokenPreApprovedFast,
+  markTokenApprovedFast,
+  isWethRouterApprovedFast,
+  markWethRouterApprovedFast,
+  buildFastSwapCalldata,
+  getInstantGasOverrides,
+} from "./zeroLatency.js";
 import { cfg, C } from "../config.js";
 import { wallet, provider, overrides } from "./client.js";
-import { ERC20_ABI, WETH_ABI, QUOTER_ABI, ROUTER_ABI } from "./abis.js";
+import { ERC20_ABI, WETH_ABI, QUOTER_ABI } from "./abis.js";
 import { logger } from "../util/log.js";
 import type { TopUp } from "../types.js";
 
 const log = logger("swap");
+
+const FEE_CACHE = new Map<string, number>(); // tokenLower → best fee
+
+export function rememberPoolFee(tokenAddr: string, fee: number): void {
+  if (fee > 0) FEE_CACHE.set(tokenAddr.toLowerCase(), fee);
+}
+
+export function cachedPoolFee(tokenAddr: string): number | undefined {
+  return FEE_CACHE.get(tokenAddr.toLowerCase());
+}
 
 /** Raw token balance (BigInt) of the bot wallet. */
 export async function tokenBalanceRaw(tokenAddr: string): Promise<bigint> {
@@ -27,54 +45,68 @@ export interface Quote {
   amountOut: bigint;
 }
 
-/** Best token→WETH quote across all fee tiers. { weth: 0 } means no liquidity (rug). */
+/** Best token→WETH quote across all fee tiers (parallel). */
 export async function quoteTokenToWeth(tokenAddr: string, amountRaw: bigint): Promise<Quote> {
   if (amountRaw <= 0n) return { weth: 0, fee: 0, amountOut: 0n };
-  const q = new ethers.Contract(C.quoter, QUOTER_ABI, wallet());
+  const q = new ethers.Contract(C.quoter, QUOTER_ABI, provider);
+  const hint = cachedPoolFee(tokenAddr);
+  const tiers = hint ? [hint, ...cfg.lp.feeTiers.filter((f) => f !== hint)] : cfg.lp.feeTiers;
+
+  const results = await Promise.all(
+    tiers.map(async (fee) => {
+      try {
+        const r = await q.quoteExactInputSingle!.staticCall({
+          tokenIn: tokenAddr,
+          tokenOut: C.weth,
+          amountIn: amountRaw,
+          fee,
+          sqrtPriceLimitX96: 0n,
+        });
+        const out = r[0] as bigint;
+        return { weth: Number(ethers.formatEther(out)), fee, amountOut: out };
+      } catch {
+        return { weth: 0, fee, amountOut: 0n };
+      }
+    }),
+  );
+
   let best: Quote = { weth: 0, fee: 0, amountOut: 0n };
-  for (const fee of cfg.lp.feeTiers) {
-    try {
-      const r = await q.quoteExactInputSingle!.staticCall({
-        tokenIn: tokenAddr,
-        tokenOut: C.weth,
-        amountIn: amountRaw,
-        fee,
-        sqrtPriceLimitX96: 0n,
-      });
-      const out = r[0] as bigint;
-      const weth = Number(ethers.formatEther(out));
-      if (weth > best.weth) best = { weth, fee, amountOut: out };
-    } catch {
-      /* pool for this fee tier doesn't exist */
-    }
+  for (const r of results) {
+    if (r.weth > best.weth) best = r;
   }
+  if (best.fee > 0) rememberPoolFee(tokenAddr, best.fee);
   return best;
 }
 
-/** Best WETH→token quote across all fee tiers. */
+/** Best WETH→token quote across fee tiers (parallel). */
 export async function quoteWethToToken(
   tokenAddr: string,
   wethRaw: bigint,
   feeHint?: number,
 ): Promise<{ amountOut: bigint; fee: number }> {
-  const q = new ethers.Contract(C.quoter, QUOTER_ABI, wallet());
+  const q = new ethers.Contract(C.quoter, QUOTER_ABI, provider);
   const tiers = feeHint ? [feeHint] : cfg.lp.feeTiers;
+  const results = await Promise.all(
+    tiers.map(async (fee) => {
+      try {
+        const r = await q.quoteExactInputSingle!.staticCall({
+          tokenIn: C.weth,
+          tokenOut: tokenAddr,
+          amountIn: wethRaw,
+          fee,
+          sqrtPriceLimitX96: 0n,
+        });
+        return { amountOut: r[0] as bigint, fee };
+      } catch {
+        return { amountOut: 0n, fee };
+      }
+    }),
+  );
   let best = { amountOut: 0n, fee: feeHint ?? 0 };
-  for (const fee of tiers) {
-    try {
-      const r = await q.quoteExactInputSingle!.staticCall({
-        tokenIn: C.weth,
-        tokenOut: tokenAddr,
-        amountIn: wethRaw,
-        fee,
-        sqrtPriceLimitX96: 0n,
-      });
-      const out = r[0] as bigint;
-      if (out > best.amountOut) best = { amountOut: out, fee };
-    } catch {
-      /* no pool this tier */
-    }
+  for (const r of results) {
+    if (r.amountOut > best.amountOut) best = r;
   }
+  if (best.fee > 0) rememberPoolFee(tokenAddr, best.fee);
   return best;
 }
 
@@ -89,99 +121,263 @@ export interface SwapResult {
   amountOut: bigint;
 }
 
-/** Swap token → WETH with slippage protection and 0ms pre-approval. */
+async function sendExactInput(params: {
+  tokenIn: string;
+  tokenOut: string;
+  fee: number;
+  amountIn: bigint;
+  amountOutMinimum: bigint;
+  nonce: number;
+  gasBoost?: bigint;
+}): Promise<ethers.TransactionResponse> {
+  const w = wallet();
+  const gas = getInstantGasOverrides();
+  const gasPrice = ((gas.gasPrice as bigint) || 1_000_000_000n) * (params.gasBoost ?? 1n);
+  const data = buildFastSwapCalldata({
+    tokenIn: params.tokenIn,
+    tokenOut: params.tokenOut,
+    fee: params.fee,
+    recipient: w.address,
+    amountIn: params.amountIn,
+    amountOutMinimum: params.amountOutMinimum,
+  });
+  return w.sendTransaction({
+    to: C.swapRouter02,
+    data,
+    nonce: params.nonce,
+    gasPrice,
+    gasLimit: (gas.gasLimit as bigint) || 350_000n,
+  });
+}
+
+/**
+ * Panic / whale-exit sell: no quote round-trip, mutex only for broadcast.
+ * Uses cached fee or default 10000; amountOutMinimum = 0 for speed.
+ */
+export async function swapTokenToWethFast(
+  tokenAddr: string,
+  amountRaw: bigint,
+  feeHint?: number,
+): Promise<SwapResult> {
+  const fee = feeHint || cachedPoolFee(tokenAddr) || 10000;
+  rememberPoolFee(tokenAddr, fee);
+
+  let needApprove = !isTokenPreApprovedFast(tokenAddr);
+  if (needApprove) {
+    const erc = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
+    const allowance: bigint = await erc.allowance!(wallet().address, C.swapRouter02).catch(() => 0n);
+    if (allowance >= amountRaw) {
+      markTokenApprovedFast(tokenAddr);
+      needApprove = false;
+    }
+  }
+
+  const resp = await withTxLock(async (nonce) => {
+    const w = wallet();
+    let n = nonce;
+    if (needApprove) {
+      const erc = new ethers.Contract(tokenAddr, ERC20_ABI, w);
+      await erc.approve!(C.swapRouter02, ethers.MaxUint256, {
+        ...getInstantGasOverrides(),
+        nonce: n,
+      });
+      markTokenApprovedFast(tokenAddr);
+      n += 1;
+    }
+    return sendExactInput({
+      tokenIn: tokenAddr,
+      tokenOut: C.weth,
+      fee,
+      amountIn: amountRaw,
+      amountOutMinimum: 0n,
+      nonce: n,
+    });
+  }, needApprove ? 2 : 1);
+
+  log.info(`⚡ [PANIC SELL SENT] ${tokenAddr.slice(0, 10)}… tx=${resp.hash}`);
+  return { tx: resp.hash, amountOut: 0n };
+}
+
+/** Swap token → WETH. Broadcast under lock; wait for receipt outside. */
 export async function swapTokenToWeth(
   tokenAddr: string,
   amountRaw: bigint,
   feeHint?: number,
 ): Promise<SwapResult> {
-  return withTxLock(async (nonce) => {
-    const w = wallet();
-    const erc = new ethers.Contract(tokenAddr, ERC20_ABI, w);
-    if (!isTokenPreApprovedFast(tokenAddr)) {
-      if ((await erc.allowance!(w.address, C.swapRouter02)) < amountRaw) {
-        await (await erc.approve!(C.swapRouter02, ethers.MaxUint256, { ...(await overrides()), nonce })).wait();
-      }
+  const quote = await quoteTokenToWeth(tokenAddr, amountRaw);
+  const fee = feeHint || quote.fee || cachedPoolFee(tokenAddr) || 10000;
+  const minOut = minOutWithSlippage(quote.amountOut);
+
+  let needApprove = !isTokenPreApprovedFast(tokenAddr);
+  if (needApprove) {
+    const erc = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
+    const allowance: bigint = await erc.allowance!(wallet().address, C.swapRouter02).catch(() => 0n);
+    if (allowance >= amountRaw) {
       markTokenApprovedFast(tokenAddr);
+      needApprove = false;
     }
-    const quote = await quoteTokenToWeth(tokenAddr, amountRaw);
-    const fee = feeHint || quote.fee || 10000;
-    const minOut = minOutWithSlippage(quote.amountOut);
-    const router = new ethers.Contract(C.swapRouter02, ROUTER_ABI, w);
-    const txOverrides = await overrides();
-    const tx = await router.exactInputSingle!(
-      {
+  }
+
+  const resp = await withTxLock(async (nonce) => {
+    const w = wallet();
+    let n = nonce;
+    if (needApprove) {
+      const erc = new ethers.Contract(tokenAddr, ERC20_ABI, w);
+      await erc.approve!(C.swapRouter02, ethers.MaxUint256, {
+        ...getInstantGasOverrides(),
+        nonce: n,
+      });
+      markTokenApprovedFast(tokenAddr);
+      n += 1;
+    }
+    return sendExactInput({
+      tokenIn: tokenAddr,
+      tokenOut: C.weth,
+      fee,
+      amountIn: amountRaw,
+      amountOutMinimum: minOut > 0n ? minOut : 0n,
+      nonce: n,
+    });
+  }, needApprove ? 2 : 1);
+
+  try {
+    const rc = await resp.wait();
+    return { tx: resp.hash, amountOut: extractWethOut(rc, wallet().address) ?? quote.amountOut };
+  } catch {
+    log.warn(`[SELL SLIPPAGE RETRY] Initial sell reverted, retrying with floor minOut=0...`);
+    const retry = await withTxLock(async (nonce) =>
+      sendExactInput({
         tokenIn: tokenAddr,
         tokenOut: C.weth,
         fee,
-        recipient: w.address,
         amountIn: amountRaw,
-        amountOutMinimum: minOut,
-        sqrtPriceLimitX96: 0n,
-      },
-      txOverrides,
+        amountOutMinimum: 0n,
+        nonce,
+        gasBoost: 2n,
+      }),
     );
-    try {
-      const rc = await tx.wait();
-      return { tx: tx.hash, amountOut: extractWethOut(rc, w.address) ?? quote.amountOut };
-    } catch (err) {
-      log.warn(`[SELL SLIPPAGE RETRY] Initial sell reverted, retrying with 15% slippage floor...`);
-      const relaxedMinOut = minOutWithSlippage(quote.amountOut, 15);
-      const retryTx = await router.exactInputSingle!(
-        {
-          tokenIn: tokenAddr,
-          tokenOut: C.weth,
-          fee,
-          recipient: w.address,
-          amountIn: amountRaw,
-          amountOutMinimum: relaxedMinOut,
-          sqrtPriceLimitX96: 0n,
-        },
-        await overrides(),
-      );
-      const rc2 = await retryTx.wait();
-      return { tx: retryTx.hash, amountOut: extractWethOut(rc2, w.address) ?? quote.amountOut };
-    }
-  });
+    const rc2 = await retry.wait();
+    return { tx: retry.hash, amountOut: extractWethOut(rc2, wallet().address) ?? quote.amountOut };
+  }
 }
 
-/** Swap WETH → token with slippage protection. */
+/** Swap WETH → token. Fire under lock; optional confirm outside. */
 export async function swapWethToToken(
   tokenAddr: string,
   wethRaw: bigint,
   fee: number,
+  opts?: { waitReceipt?: boolean; minOut?: bigint },
 ): Promise<SwapResult> {
-  return withTxLock(async (nonce) => {
-    const w = wallet();
-    const wc = new ethers.Contract(C.weth, WETH_ABI, w);
-    if ((await wc.allowance!(w.address, C.swapRouter02)) < wethRaw) {
-      await (await wc.approve!(C.swapRouter02, ethers.MaxUint256, { ...(await overrides()), nonce })).wait();
+  const useFee = fee > 0 ? fee : cachedPoolFee(tokenAddr) || 10000;
+  rememberPoolFee(tokenAddr, useFee);
+
+  let needApprove = !isWethRouterApprovedFast();
+  if (needApprove) {
+    const wc = new ethers.Contract(C.weth, WETH_ABI, provider);
+    const allowance: bigint = await wc.allowance!(wallet().address, C.swapRouter02).catch(() => 0n);
+    if (allowance >= wethRaw) {
+      markWethRouterApprovedFast();
+      needApprove = false;
     }
-    const quote = await quoteWethToToken(tokenAddr, wethRaw, fee);
-    const minOut = minOutWithSlippage(quote.amountOut);
-    const erc = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
-    const before: bigint = await erc.balanceOf!(w.address);
-    const router = new ethers.Contract(C.swapRouter02, ROUTER_ABI, w);
-    const txOverrides = { ...(await overrides()), nonce };
-    const tx = await router.exactInputSingle!(
-      {
-        tokenIn: C.weth,
-        tokenOut: tokenAddr,
-        fee: fee > 0 ? fee : 10000,
-        recipient: w.address,
-        amountIn: wethRaw,
-        amountOutMinimum: minOut,
-        sqrtPriceLimitX96: 0n,
-      },
-      txOverrides,
-    );
-    await tx.wait();
-    const after: bigint = await erc.balanceOf!(w.address);
-    return { tx: tx.hash, amountOut: after - before };
-  });
+  }
+
+  let minOut = opts?.minOut;
+  if (minOut === undefined) {
+    // Skip quote when caller wants pure speed (minOut=0n); otherwise soft quote
+    const quote = await quoteWethToToken(tokenAddr, wethRaw, useFee);
+    minOut = minOutWithSlippage(quote.amountOut);
+  }
+
+  const resp = await withTxLock(async (nonce) => {
+    const w = wallet();
+    let n = nonce;
+    if (needApprove) {
+      const wc = new ethers.Contract(C.weth, WETH_ABI, w);
+      await wc.approve!(C.swapRouter02, ethers.MaxUint256, {
+        ...getInstantGasOverrides(),
+        nonce: n,
+      });
+      markWethRouterApprovedFast();
+      n += 1;
+    }
+    return sendExactInput({
+      tokenIn: C.weth,
+      tokenOut: tokenAddr,
+      fee: useFee,
+      amountIn: wethRaw,
+      amountOutMinimum: minOut ?? 0n,
+      nonce: n,
+    });
+  }, needApprove ? 2 : 1);
+
+  if (opts?.waitReceipt === false) {
+    return { tx: resp.hash, amountOut: 0n };
+  }
+
+  const erc = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
+  const before: bigint = await erc.balanceOf!(wallet().address).catch(() => 0n);
+  await resp.wait();
+  const after: bigint = await erc.balanceOf!(wallet().address).catch(() => before);
+  return { tx: resp.hash, amountOut: after > before ? after - before : 0n };
 }
 
-/** Pre-approve token for SwapRouter02 immediately upon purchase to enable 0ms instant exit */
+/**
+ * Fire N consecutive WETH→token swaps with consecutive nonces (no inter-tranche wait).
+ * Returns first tx hash immediately after all are broadcast.
+ */
+export async function swapWethToTokenMultiFire(
+  tokenAddr: string,
+  amounts: bigint[],
+  fee: number,
+): Promise<{ tx: string; hashes: string[] }> {
+  const useFee = fee > 0 ? fee : 10000;
+  rememberPoolFee(tokenAddr, useFee);
+  const positive = amounts.filter((a) => a > 0n);
+  if (!positive.length) return { tx: "", hashes: [] };
+
+  let needApprove = !isWethRouterApprovedFast();
+  if (needApprove) {
+    const wc = new ethers.Contract(C.weth, WETH_ABI, provider);
+    const allowance: bigint = await wc.allowance!(wallet().address, C.swapRouter02).catch(() => 0n);
+    if (allowance >= positive.reduce((s, a) => s + a, 0n)) {
+      markWethRouterApprovedFast();
+      needApprove = false;
+    }
+  }
+
+  const spend = (needApprove ? 1 : 0) + positive.length;
+  const hashes = await withTxLock(async (nonce) => {
+    const w = wallet();
+    let n = nonce;
+    const out: string[] = [];
+    if (needApprove) {
+      const wc = new ethers.Contract(C.weth, WETH_ABI, w);
+      await wc.approve!(C.swapRouter02, ethers.MaxUint256, {
+        ...getInstantGasOverrides(),
+        nonce: n,
+      });
+      markWethRouterApprovedFast();
+      n += 1;
+    }
+    for (const amt of positive) {
+      const resp = await sendExactInput({
+        tokenIn: C.weth,
+        tokenOut: tokenAddr,
+        fee: useFee,
+        amountIn: amt,
+        amountOutMinimum: 0n,
+        nonce: n,
+      });
+      out.push(resp.hash);
+      n += 1;
+    }
+    return out;
+  }, spend);
+
+  return { tx: hashes[0] ?? "", hashes };
+}
+
+/** Pre-approve token for SwapRouter02 — broadcast only, mark optimistic, confirm async. */
 export async function preApproveTokenForExit(tokenAddr: string): Promise<boolean> {
   try {
     if (isTokenPreApprovedFast(tokenAddr)) return true;
@@ -190,13 +386,19 @@ export async function preApproveTokenForExit(tokenAddr: string): Promise<boolean
     const allowance: bigint = await erc.allowance!(w.address, C.swapRouter02).catch(() => 0n);
     if (allowance < ethers.MaxUint256 / 2n) {
       log.info(`⚡ [INSTANT PRE-APPROVAL] Pre-approving token ${tokenAddr} for SwapRouter02...`);
-      return withTxLock(async (nonce) => {
-        const tx = await erc.approve!(C.swapRouter02, ethers.MaxUint256, { ...(await overrides()), nonce });
-        await tx.wait();
-        markTokenApprovedFast(tokenAddr);
-        log.info(`⚡ [PRE-APPROVAL COMPLETE ✅] ${tokenAddr} pre-approved for 0ms instant sell exits! (Tx: ${tx.hash})`);
-        return true;
+      const resp = await withTxLock(async (nonce) => {
+        return erc.approve!(C.swapRouter02, ethers.MaxUint256, {
+          ...getInstantGasOverrides(),
+          nonce,
+        });
       });
+      markTokenApprovedFast(tokenAddr); // optimistic — don't wait
+      void resp.wait().then(() => {
+        log.info(`⚡ [PRE-APPROVAL COMPLETE ✅] ${tokenAddr} (Tx: ${resp.hash})`);
+      }).catch(() => {
+        /* allowance probe on next sell */
+      });
+      return true;
     }
     markTokenApprovedFast(tokenAddr);
     return true;
@@ -206,7 +408,6 @@ export async function preApproveTokenForExit(tokenAddr: string): Promise<boolean
   }
 }
 
-/** Sum of WETH Transfer events into `to` in a receipt (real swap output). */
 function extractWethOut(rc: ethers.TransactionReceipt | null, to: string): bigint | null {
   if (!rc) return null;
   const wethL = C.weth.toLowerCase();

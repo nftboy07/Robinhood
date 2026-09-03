@@ -28,23 +28,29 @@ export async function findPools(tokenAddr: string): Promise<PoolInfo[]> {
   const weth = ethers.getAddress(C.weth);
   const factory = new ethers.Contract(C.factory, FACTORY_ABI, provider);
   const wc = new ethers.Contract(weth, ERC20_ABI, provider);
-  const out: PoolInfo[] = [];
 
-  for (const fee of cfg.lp.feeTiers) {
-    const pool: string = await factory.getPool!(token, weth, fee).catch(() => ethers.ZeroAddress);
-    if (pool === ethers.ZeroAddress) continue;
-    const pc = new ethers.Contract(pool, POOL_ABI, provider);
-    const [liq, t0] = await Promise.all([pc.liquidity!(), pc.token0!()]);
-    if (liq === 0n) continue;
-    const wbal: bigint = await wc.balanceOf!(pool).catch(() => 0n);
-    out.push({
-      pool,
-      fee,
-      liquidity: liq,
-      token0: ethers.getAddress(t0),
-      wethInPool: Number(ethers.formatEther(wbal)),
-    });
-  }
+  const perTier = await Promise.all(
+    cfg.lp.feeTiers.map(async (fee) => {
+      const pool: string = await factory.getPool!(token, weth, fee).catch(() => ethers.ZeroAddress);
+      if (pool === ethers.ZeroAddress) return null;
+      const pc = new ethers.Contract(pool, POOL_ABI, provider);
+      const [liq, t0, wbal] = await Promise.all([
+        pc.liquidity!(),
+        pc.token0!(),
+        wc.balanceOf!(pool).catch(() => 0n),
+      ]);
+      if (liq === 0n) return null;
+      return {
+        pool,
+        fee,
+        liquidity: liq as bigint,
+        token0: ethers.getAddress(t0),
+        wethInPool: Number(ethers.formatEther(wbal as bigint)),
+      } satisfies PoolInfo;
+    }),
+  );
+
+  const out = perTier.filter((p): p is PoolInfo => p !== null);
   out.sort((a, b) => b.wethInPool - a.wethInPool);
   return out;
 }

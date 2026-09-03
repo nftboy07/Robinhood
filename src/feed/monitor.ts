@@ -26,6 +26,12 @@ import { logger } from "../util/log.js";
 import { FeedListener } from "./listener.js";
 import { extractPoolEvents } from "./lpdecode.js";
 import { extractSwaps } from "./swapdecode.js";
+import {
+  isApproveCalldata,
+  isRouterSpender,
+  decodeApproveSpender,
+} from "../radar/approvalFrontrunner.js";
+import { getHeldTokenKeys, panicExitToken } from "../radar/strategy.js";
 import type { PoolEvent } from "./lpdecode.js";
 import type { PositionRow } from "../types.js";
 
@@ -71,7 +77,10 @@ export class FeedMonitor {
   private lastRangeCheck = new Map<string, number>(); // tokenLower → ts
   private inflight = new Set<string>(); // tokens being checked (dedupe async)
   private posTimer: ReturnType<typeof setInterval> | null = null;
-  private stats = { newTokens: 0, rangeAlerts: 0, framesTx: 0 };
+  private seenFlushTimer: ReturnType<typeof setInterval> | null = null;
+  private seenDirty = false;
+  private panicInflight = new Set<string>();
+  private stats = { newTokens: 0, rangeAlerts: 0, framesTx: 0, panicExits: 0 };
 
   constructor(private readonly hooks: MonitorHooks) {
     this.seen = new Set(readJson<string[]>(SEEN_FILE, []).map((s) => s.toLowerCase()));
@@ -79,19 +88,22 @@ export class FeedMonitor {
   }
 
   async start(): Promise<void> {
-    if (!this.seen.size) await this.warmSeed();
-    await this.refreshPositions();
-    this.posTimer = setInterval(() => void this.refreshPositions(), POS_REFRESH_MS);
+    // Connect feed FIRST — warm-seed / positions in background
     this.listener.start();
+    this.seenFlushTimer = setInterval(() => this.flushSeen(), 5_000);
+    this.posTimer = setInterval(() => void this.refreshPositions(), POS_REFRESH_MS);
+    void this.refreshPositions();
+    if (!this.seen.size) void this.warmSeed();
     log.info(
-      `ON — newToken=${cfg.feed.newToken} positionMonitor=${cfg.feed.positionMonitor} autoClose=${cfg.feed.autoCloseOutOfRange}`,
+      `ON — newToken=${cfg.feed.newToken} positionMonitor=${cfg.feed.positionMonitor} autoClose=${cfg.feed.autoCloseOutOfRange} whaleExit=feed`,
     );
   }
 
   stop(): void {
     this.listener.stop();
     if (this.posTimer) clearInterval(this.posTimer);
-    this.persistSeen();
+    if (this.seenFlushTimer) clearInterval(this.seenFlushTimer);
+    this.flushSeen(true);
   }
 
   status(): { seen: number; positions: number } & typeof this.stats {
@@ -100,12 +112,30 @@ export class FeedMonitor {
 
   // ── feed consumer (hot path — keep it cheap, defer RPC) ──
   private onTx(txs: { tx: ethers.Transaction; sequenceNumber: number }[]): void {
+    const held = new Set(getHeldTokenKeys().map((k) => k.toLowerCase()));
+
     for (const ftx of txs) {
+      if (held.size) {
+        this.maybeWhaleExit(ftx.tx, held);
+      }
+
       if (cfg.feed.newToken) {
         for (const ev of extractPoolEvents(ftx)) this.maybeNewToken(ev);
       }
+
+      // Decode SwapRouter02 once
+      const swaps = held.size || (cfg.feed.positionMonitor && this.positions.size) ? extractSwaps(ftx) : [];
+      if (held.size) {
+        for (const s of swaps) {
+          const k = s.token.toLowerCase();
+          if (held.has(k) && s.direction === "sell") {
+            this.triggerPanic(k, `feed-sell ${ftx.tx.hash?.slice(0, 12) ?? ""}`);
+          }
+        }
+      }
+
       if (cfg.feed.positionMonitor && this.positions.size) {
-        for (const s of extractSwaps(ftx)) {
+        for (const s of swaps) {
           const k = s.token.toLowerCase();
           if (this.positions.has(k)) {
             this.stats.framesTx++;
@@ -115,6 +145,24 @@ export class FeedMonitor {
         }
       }
     }
+  }
+
+  private maybeWhaleExit(tx: ethers.Transaction, held: Set<string>): void {
+    const to = tx.to?.toLowerCase();
+    if (!to || !held.has(to)) return;
+    if (!isApproveCalldata(tx.data)) return;
+    const spender = decodeApproveSpender(tx.data!);
+    if (!isRouterSpender(spender)) return;
+    this.triggerPanic(to, `feed-approve from ${tx.from?.slice(0, 10) ?? "?"} → ${spender.slice(0, 10)}`);
+  }
+
+  private triggerPanic(tokenLower: string, reason: string): void {
+    if (this.panicInflight.has(tokenLower)) return;
+    this.panicInflight.add(tokenLower);
+    this.stats.panicExits++;
+    void panicExitToken(tokenLower, reason).finally(() => {
+      this.panicInflight.delete(tokenLower);
+    });
   }
 
   private maybeNewToken(ev: PoolEvent): void {
@@ -145,7 +193,7 @@ export class FeedMonitor {
         /* ignore */
       }
       this.stats.newTokens++;
-      this.persistSeen();
+      this.seenDirty = true;
       this.hooks.onNewToken({
         token: ev.token,
         symbol: meta?.symbol ?? "?",
@@ -221,12 +269,19 @@ export class FeedMonitor {
     }
   }
 
-  private persistSeen(): void {
+  private flushSeen(force = false): void {
+    if (!this.seenDirty && !force) return;
     try {
       writeJson(SEEN_FILE, [...this.seen]);
+      this.seenDirty = false;
     } catch {
       /* best effort */
     }
+  }
+
+  private persistSeen(): void {
+    this.seenDirty = true;
+    this.flushSeen(true);
   }
 
   private async warmSeed(): Promise<void> {

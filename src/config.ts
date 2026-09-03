@@ -60,7 +60,7 @@ const WatchSchema = z.object({
 
 // Real-time sequencer-feed monitor (see src/feed/). Opt-in (advanced).
 const FeedSchema = z.object({
-  enabled: z.boolean().default(false),
+  enabled: z.boolean().default(true),
   newToken: z.boolean().default(true), // alert on fresh WETH pools / first mints
   positionMonitor: z.boolean().default(true), // watch swaps hitting YOUR pools + range
   autoCloseOutOfRange: z.boolean().default(false), // DANGER: auto-close when price leaves range

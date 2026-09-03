@@ -1,7 +1,5 @@
 /**
- * Candidate pipeline: score once → notify with the verdict → maybe auto-LP.
- * Single place that ties detection (feed/watch) to radar + notifications + autonomous LP,
- * so the LLM/GMGN verdict is computed exactly once and reused everywhere.
+ * Candidate pipeline: for sniper sources, auto-LP FIRST; score/notify async.
  */
 import { cfg } from "../config.js";
 import { scoreCandidate, type Candidate, type Verdict } from "../radar/radar.js";
@@ -16,13 +14,13 @@ const log = logger("pipeline");
 async function runAuto(candidate: Candidate, verdict: Verdict | null): Promise<void> {
   try {
     const r = await maybeAutoLp(candidate, verdict);
-    if (r?.opened) await notifyAutoLp(r);
+    if (r?.opened) void notifyAutoLp(r).catch(() => {});
   } catch (e) {
     log.error(`auto-lp err: ${(e as Error).message}`);
   }
 }
 
-/** Watch/scan spike → verdict → notify → auto-LP. */
+/** Watch/scan spike → auto-LP first when attach off; else score parallel with notify. */
 export async function handleSpike(h: SpikeHit): Promise<void> {
   const candidate: Candidate = {
     token: h.addr,
@@ -35,12 +33,21 @@ export async function handleSpike(h: SpikeHit): Promise<void> {
     onchainBackPct: h.safe.backPct,
     onchainTaxPct: h.safe.taxPct,
   };
-  const verdict = cfg.radar.attachToWatch ? await scoreCandidate(candidate).catch(() => null) : null;
-  await notifySpike(h, verdict);
+
+  if (!cfg.radar.attachToWatch) {
+    void notifySpike(h, null).catch(() => {});
+    await runAuto(candidate, null);
+    return;
+  }
+
+  const verdictP = scoreCandidate(candidate).catch(() => null);
+  // Don't block buy on notify
+  void verdictP.then((v) => notifySpike(h, v).catch(() => {}));
+  const verdict = await verdictP;
   await runAuto(candidate, verdict);
 }
 
-/** Feed new-token → verdict → notify → auto-LP. */
+/** Feed new-token → SNIPE FIRST, score/notify in background. */
 export async function handleNewToken(a: NewTokenAlert): Promise<void> {
   const candidate: Candidate = {
     token: a.token,
@@ -50,7 +57,18 @@ export async function handleNewToken(a: NewTokenAlert): Promise<void> {
     wethSeed: a.wethSeed,
     onchainBackPct: a.backPct,
   };
-  const verdict = cfg.radar.attachToNewToken ? await scoreCandidate(candidate).catch(() => null) : null;
-  await notifyNewToken(a, verdict);
-  await runAuto(candidate, verdict);
+
+  // Critical path: buy immediately with synthetic high-confidence verdict
+  const fastVerdict: Verdict = {
+    llm: { score: 95, action: "ape", summary: "feed-new fast path" },
+    gmgn: null,
+  };
+  const buyP = runAuto(candidate, fastVerdict);
+
+  void notifyNewToken(a, fastVerdict).catch(() => {});
+  if (cfg.radar.attachToNewToken) {
+    void scoreCandidate(candidate).catch(() => null); // enrichment only
+  }
+
+  await buyP;
 }
