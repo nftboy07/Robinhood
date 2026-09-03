@@ -82,6 +82,10 @@ async function main() {
   const feeData = await provider.getFeeData();
   const gasPrice = feeData.gasPrice ?? feeData.maxFeePerGas ?? 100000000n;
   let gasCost = gasPrice * CFG.gasUnits;
+  let cachedGas = {
+    maxFeePerGas: (feeData.maxFeePerGas || gasPrice) * 2n,
+    maxPriorityFeePerGas: ((feeData.maxPriorityFeePerGas || gasPrice / 2n) * 2n),
+  };
 
   console.log(`\nRobinFun<->UniV4 arb | ${CFG.live ? 'LIVE' : 'DRY-RUN'} | ${executor ? 'ATOMIC' : 'EOA'} | ${CFG.watchlist ? 'WATCHLIST' : 'single'}`);
   console.log(`wallet: ${wallet ? wallet.address : '(monitor only)'}`);
@@ -145,16 +149,14 @@ async function main() {
   const eoaApproved = new Set();
   async function getGasOverrides() {
     try {
-      const feeData = await provider.getFeeData();
-      const multiplier = 200n; // 2.0x priority multiplier to avoid mempool sticking
-      const maxFee = (feeData.maxFeePerGas || feeData.gasPrice || 100000000n) * multiplier / 100n;
-      const maxPriority = (feeData.maxPriorityFeePerGas || (maxFee / 2n)) * multiplier / 100n;
-      return {
-        maxFeePerGas: maxFee,
-        maxPriorityFeePerGas: maxPriority
-      };
+      const feeData = await (execProvider || provider).getFeeData();
+      const multiplier = 200n;
+      const maxFee = ((feeData.maxFeePerGas || feeData.gasPrice || 100000000n) * multiplier) / 100n;
+      const maxPriority = ((feeData.maxPriorityFeePerGas || maxFee / 2n) * multiplier) / 100n;
+      cachedGas = { maxFeePerGas: maxFee, maxPriorityFeePerGas: maxPriority };
+      return cachedGas;
     } catch (e) {
-      return {};
+      return cachedGas || {};
     }
   }
 
@@ -202,7 +204,7 @@ async function main() {
     console.log(`  [A] buy curve ${b.market.symbol} ${formatEther(b.size)} ETH`);
     const buyRc = await (await curve.buy(token, bpsDown(q, CFG.slippageBps), { value: b.size, ...overrides })).wait();
     const got = (await t.balanceOf(wallet.address)) - before;
-    await notifyBuy({ token: token, symbol: b.market.symbol, venue: 'curve', ethIn: b.size, tokens: got, hash: buyRc.hash });
+    notifyBuy({ token: token, symbol: b.market.symbol, venue: 'curve', ethIn: b.size, tokens: got, hash: buyRc.hash }).catch(() => {});
     const target = b.size + gasCost + (b.size * CFG.minProfitBps) / 10000n;
     try {
       const sw = buildV4Swap({ zeroForOne: false, amountIn: got, amountOutMin: target, deadline: deadline(), key: b.pool.key });
@@ -210,7 +212,7 @@ async function main() {
       const sellRc = await (await router.execute(sw.commands, sw.inputs, sw.deadline, { value: sw.value, ...overrides })).wait();
       console.log('  PROFIT tx', sellRc.hash);
       const s = parseSwap(sellRc);
-      await notifySell({ token: token, symbol: b.market.symbol, venue: `V4 ${b.pool.name}`, tokens: got, ethOut: s ? s.ethAbs : 0n, hash: sellRc.hash });
+      notifySell({ token: token, symbol: b.market.symbol, venue: `V4 ${b.pool.name}`, tokens: got, ethOut: s ? s.ethAbs : 0n, hash: sellRc.hash }).catch(() => {});
     } catch (e) {
       console.log('  missed window -> unwind on curve:', e.shortMessage || e.message);
       const minEth = bpsDown(await curve.quoteSell(token, got), CFG.slippageBps);
@@ -226,13 +228,13 @@ async function main() {
     console.log(`  [B] buy V4 ${b.pool.name} ${b.market.symbol} ${formatEther(b.size)} ETH`);
     const buyRc = await (await router.execute(sw.commands, sw.inputs, sw.deadline, { value: sw.value, ...overrides })).wait();
     const got = (await t.balanceOf(wallet.address)) - before;
-    await notifyBuy({ token: token, symbol: b.market.symbol, venue: `V4 ${b.pool.name}`, ethIn: b.size, tokens: got, hash: buyRc.hash });
+    notifyBuy({ token: token, symbol: b.market.symbol, venue: `V4 ${b.pool.name}`, ethIn: b.size, tokens: got, hash: buyRc.hash }).catch(() => {});
     const qSell = await curve.quoteSell(token, got);
     const minEth = bpsDown(qSell, CFG.slippageBps);
     console.log(`  [B] sell curve ${formatEther(got)} tok, min ${formatEther(minEth)} ETH`);
     const sellRc = await (await curve.sell(token, got, minEth, overrides)).wait();
     console.log('  done tx', sellRc.hash);
-    await notifySell({ token: token, symbol: b.market.symbol, venue: 'curve', tokens: got, ethOut: qSell, hash: sellRc.hash });
+    notifySell({ token: token, symbol: b.market.symbol, venue: 'curve', tokens: got, ethOut: qSell, hash: sellRc.hash }).catch(() => {});
   }
 
   let busy = false, scanning = false, lastLog = 0;
