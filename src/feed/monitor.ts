@@ -13,7 +13,7 @@
  */
 import { ethers } from "ethers";
 import { cfg } from "../config.js";
-import { provider } from "../chain/client.js";
+import { provider, wallet } from "../chain/client.js";
 import { POOL_ABI } from "../chain/abis.js";
 import { tokenMeta } from "../chain/tokens.js";
 import { findPools } from "../chain/pools.js";
@@ -126,11 +126,12 @@ export class FeedMonitor {
       // Decode SwapRouter02 once
       const swaps = held.size || (cfg.feed.positionMonitor && this.positions.size) ? extractSwaps(ftx) : [];
       if (held.size) {
+        const me = wallet().address.toLowerCase();
         for (const s of swaps) {
           const k = s.token.toLowerCase();
-          if (held.has(k) && s.direction === "sell") {
-            this.triggerPanic(k, `feed-sell ${ftx.tx.hash?.slice(0, 12) ?? ""}`);
-          }
+          if (!held.has(k) || s.direction !== "sell") continue;
+          if (s.from && s.from.toLowerCase() === me) continue; // our own sells
+          this.triggerPanic(k, `feed-sell ${ftx.tx.hash?.slice(0, 12) ?? ""}`);
         }
       }
 
@@ -148,6 +149,9 @@ export class FeedMonitor {
   }
 
   private maybeWhaleExit(tx: ethers.Transaction, held: Set<string>): void {
+    const from = tx.from?.toLowerCase();
+    const me = wallet().address.toLowerCase();
+    if (from && from === me) return; // our own pre-approve is NOT a whale dump
     const to = tx.to?.toLowerCase();
     if (!to || !held.has(to)) return;
     if (!isApproveCalldata(tx.data)) return;

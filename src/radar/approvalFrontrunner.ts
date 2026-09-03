@@ -2,7 +2,7 @@
  * Whale Sell Approval Frontrunner — block-poll FALLBACK only.
  * Primary race path is sequencer feed (see FeedMonitor / panicExitToken).
  */
-import { provider } from "../chain/client.js";
+import { provider, wallet } from "../chain/client.js";
 import { C } from "../config.js";
 import { getHeldTokenKeys, panicExitToken } from "./strategy.js";
 import { logger } from "../util/log.js";
@@ -48,6 +48,8 @@ export async function pollWhaleApprovals(): Promise<void> {
         const targetToken = tx.to?.toLowerCase();
         if (!targetToken || !held.has(targetToken)) continue;
         if (!tx.data?.startsWith(APPROVE_SIG)) continue;
+        const from = tx.from?.toLowerCase();
+        if (from && from === wallet().address.toLowerCase()) continue;
 
         const spender = ("0x" + tx.data.slice(34, 74)).toLowerCase();
         if (!ROUTERS.has(spender)) continue;

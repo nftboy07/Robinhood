@@ -23,7 +23,7 @@ import {
 import { balances } from "../chain/holdings.js";
 import { wallet, overrides } from "../chain/client.js";
 import { WETH_ABI } from "../chain/abis.js";
-import { trackNewMemeBuy, countOpenMemePositions } from "./strategy.js";
+import { trackNewMemeBuy, countOpenMemePositions, getHeldPosition } from "./strategy.js";
 import { isBlacklisted, addToBlacklist } from "./blacklist.js";
 import { auditTokenSecurity } from "../tools/cryptoTools.js";
 import { dataPath, readJson, writeJson } from "../util/files.js";
@@ -120,6 +120,11 @@ export async function maybeAutoLp(
 
   if (isBlacklisted(candidate.token)) return skip("blacklisted honeypot/scam token");
   if (!a.sources.includes(candidate.source)) return skip(`source ${candidate.source} not allowed`);
+  const junk = (candidate.symbol || "").toUpperCase();
+  if (junk === "UNI-V3-POS" || junk === "UNI-V4-POS" || junk === "WETH") {
+    return skip(`junk token ${candidate.symbol}`);
+  }
+  if (getHeldPosition(candidate.token)) return skip("already holding this token");
 
   const g = verdict?.gmgn ?? null;
   const mcap = (g as any)?.marketCap ?? candidate.fdv ?? 0;
