@@ -99,19 +99,48 @@ async function findRecentLaunches() {
   console.log('\nOnce you have addresses, update config.json (factory/weth/router) and run the LIVE bot on mainnet.');
 
   // Bonus: print a ready config snippet you can copy into config.json
-  console.log('\n=== READY CONFIG SNIPPET (copy/edit into config.json) ===');
+  const o1Topic = '0x207384e895174175cc774fe7f7457b37c382f27ebf53d37d5257b862f80eaf9c';
+  const hoodTopic = '0xaab7db13ef23b7916e432d22cf716aebaff1644c405a4632fac716da46e9520e';
+  const noxaTopic = topics.TokenCreated;
+  const launchpads = [
+    { name: 'O1 v3 (active)', factory: '0x411F21283D3E492BC395027329e08f9F4F560Ba5', topic: o1Topic },
+    { name: 'O1 v2', factory: '0x76f0923Ac4dF0A079A10F628A7bcE6426CCd344A', topic: o1Topic },
+    { name: 'O1 v1', factory: '0x8B40fc20c405d47D725c9723D056a1c6f62BBccf', topic: o1Topic },
+    { name: 'hood.fun', factory: '0x694b6c5299a0416e0997c62de5503a00a82a48f3', topic: hoodTopic },
+    { name: 'NOXA (legacy)', factory: '0xE7fC3eD1cCe4222047F07d4E58AF41C89Ac4A800', topic: noxaTopic }
+  ];
+
+  console.log('\n--- Launchpad activity (last ' + LOOKBACK + ' blocks) ---');
+  let activeFactory = null;
+  for (const lp of launchpads) {
+    try {
+      const lpLogs = await provider.getLogs({ address: lp.factory, fromBlock, toBlock: current, topics: [lp.topic] });
+      console.log(`  ${lp.name}: ${lpLogs.length} launches @ ${lp.factory}`);
+      if (lpLogs.length > 0 && !activeFactory) activeFactory = lp.factory;
+    } catch (e) {
+      console.log(`  ${lp.name}: scan error (${e.message})`);
+    }
+  }
+
+  const WETH = '0xc6911796042b15d7fa4f6cde69e245ddcd3d9c31';
+  const ROUTER = '0x8876789976dEcBfCbBbe364623C63652db8C0904';
+  const DEX_FACTORY = '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f';
+
+  console.log('\n=== READY CONFIG SNIPPET (verified addresses) ===');
   console.log(JSON.stringify({
-    rpc: "https://rpc.mainnet.chain.robinhood.com",
-    factory: "0xREPLACE_WITH_DISCOVERED_FACTORY",
-    weth: "0xREPLACE_WITH_WETH",
-    router: "0xREPLACE_WITH_ROUTER",
-    snipeAmountEth: "0.0001",
+    rpc: RPC,
+    factory: activeFactory || '0x411F21283D3E492BC395027329e08f9F4F560Ba5',
+    weth: WETH,
+    router: ROUTER,
+    dexFactory: DEX_FACTORY,
+    debankChainId: 'hood',
+    snipeAmountEth: '0.0001',
     stopLossPct: 0.20,
     takeProfitPct: 1.0,
     trailingStopPct: 0.25,
     pollIntervalMs: 800,
     gasMultiplier: 2.0,
-    logLevel: "info",
+    logLevel: 'info',
     honeypotCheck: true,
     maxDailyLossPct: 5,
     maxTradesPerHour: 20,
@@ -122,12 +151,13 @@ async function findRecentLaunches() {
       tpSellPercents: [30, 30, 40],
       reEntryOnDip: true,
       reEntryDipPct: 0.30,
-      reEntryAmountEth: "0.00005",
+      reEntryAmountEth: '0.00005',
       maxReEntriesPerPosition: 2,
       moonbagPct: 25
     }
   }, null, 2));
-  console.log('\nReplace the 0xREPLACE_ values with real ones, then git pull + pm2 restart on VPS.');
+  console.log('\nQuick setup: node setup.js  (creates config.json from example)');
+  console.log('Then edit .env with PK + Telegram, restart PM2 on VPS.');
 }
 
 findRecentLaunches().catch(console.error);

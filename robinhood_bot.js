@@ -1650,8 +1650,10 @@ async function getDeBankPortfolio(walletAddress) {
   const apiKey = config.debankKey || process.env.DEBANK_KEY;
   if (!apiKey || apiKey.includes('REPLACE')) return null;
 
+  const debankChainId = config.debankChainId || 'hood';
+
   try {
-    const url = `https://pro-openapi.debank.com/v1/user/all_token_list?id=${walletAddress}`;
+    const url = `https://pro-openapi.debank.com/v1/user/all_token_list?id=${walletAddress}&chain_ids=${debankChainId}&is_all=true`;
     const res = await fetch(url, {
       method: 'GET',
       headers: {
@@ -1675,21 +1677,35 @@ async function getDeBankPortfolio(walletAddress) {
     const portfolio = new Map();
     let ethPriceUsd = 3000;
 
+    const indexToken = (key, item) => {
+      if (!key) return;
+      const normalized = key.toLowerCase();
+      portfolio.set(normalized, {
+        amount: parseFloat(item.amount) || 0,
+        priceUsd: parseFloat(item.price) || 0,
+        symbol: item.symbol,
+        name: item.name
+      });
+    };
+
     for (const item of data) {
-      if (item.symbol === 'ETH' && (!item.id || item.id === 'eth')) {
+      const isNativeEth = item.symbol === 'ETH' && (!item.id || item.id === 'eth' || item.id === debankChainId);
+      if (isNativeEth) {
         ethPriceUsd = parseFloat(item.price) || ethPriceUsd;
       }
+
       if (item.id) {
-        portfolio.set(item.id.toLowerCase(), {
-          amount: parseFloat(item.amount) || 0,
-          priceUsd: parseFloat(item.price) || 0,
-          symbol: item.symbol,
-          name: item.name
-        });
+        indexToken(item.id, item);
+        if (item.id.includes('_')) {
+          indexToken(item.id.split('_').pop(), item);
+        }
+      }
+      if (item.contract_id) {
+        indexToken(item.contract_id, item);
       }
     }
 
-    const ethItem = data.find(i => i.id === 'eth' || i.symbol === 'ETH');
+    const ethItem = data.find(i => i.id === 'eth' || i.id === debankChainId || (i.symbol === 'ETH' && i.chain === debankChainId));
     portfolio.set('eth', {
       amount: ethItem ? parseFloat(ethItem.amount) : 0,
       priceUsd: ethPriceUsd,
@@ -2913,7 +2929,7 @@ async function snipeV4(tokenAddr, display, poolKey, overrideAmountStr = null) {
       key: poolKey
     });
 
-    const routerAddr = '0x8876789976decbfcbbbe364623c63652db8c0904';
+    const routerAddr = ROUTER || '0x8876789976decbfcbbbe364623c63652db8c0904';
     const routerContract = new ethers.Contract(routerAddr, [
       'function execute(bytes commands, bytes[] inputs, uint256 deadline) payable'
     ], wallet);
@@ -3007,7 +3023,7 @@ async function resolveV4PoolKey(tokenAddr) {
 
 async function approvePermit2IfNeeded(tokenAddr) {
   const permit2Addr = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
-  const routerAddr = '0x8876789976decbfcbbbe364623c63652db8c0904';
+  const routerAddr = ROUTER || '0x8876789976decbfcbbbe364623c63652db8c0904';
   
   const tokenContract = new ethers.Contract(tokenAddr, [
     'function allowance(address owner, address spender) view returns (uint256)',
@@ -3097,7 +3113,7 @@ async function sellV4(pos, sellAmt, exitType = 'MANUAL') {
       key: poolKey
     });
 
-    const routerAddr = '0x8876789976decbfcbbbe364623c63652db8c0904';
+    const routerAddr = ROUTER || '0x8876789976decbfcbbbe364623c63652db8c0904';
     const routerContract = new ethers.Contract(routerAddr, [
       'function execute(bytes commands, bytes[] inputs, uint256 deadline) payable'
     ], wallet);
