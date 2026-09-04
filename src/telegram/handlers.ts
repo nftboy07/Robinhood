@@ -1,3 +1,5 @@
+import { STOCK_TICKERS } from "../radar/stockyardScreener.js";
+import { formatChartZoneHtml } from "../radar/chartZoneRadar.js";
 /** Command + callback handlers. Each renders through tg.send/edit (owner chat only). */
 import { cfg, env, persist } from "../config.js";
 import { tokenMeta } from "../chain/tokens.js";
@@ -1737,4 +1739,27 @@ export async function onSetAlert(cmd: string): Promise<void> {
   const { setCustomAlert } = await import("../radar/customAlerts.js");
   setCustomAlert(sym, target);
   await send(`🔔 <b>[ALERT SET]</b>\n• Token: <b>$${sym.toUpperCase()}</b>\n• Target: <b>${target}x Multiplier</b>\n• The bot will immediately notify you when hit!`);
+}
+
+export async function handleStockyardCommand(chatId: number): Promise<void> {
+  const stockList = STOCK_TICKERS.map(s => `<code>$${s}</code>`).join(", ");
+  const msg = 
+    `🏛️ <b>[STOCKYARD & RHPS PAIR SCREENER]</b>\n\n` +
+    `Monitoring tokenized equity & stock meme launches on <b>Robinhood Chain</b>.\n\n` +
+    `• <b>Supported Stock Pairs:</b>\n${stockList}\n\n` +
+    `• <b>Platforms Tracked:</b>\n` +
+    `  ├ 🏛️ <a href="https://stockyard.rhps.fun">Stockyard (stockyard.rhps.fun)</a>\n` +
+    `  └ 📊 <a href="https://chart.zone">Chart.zone (chart.zone)</a>\n\n` +
+    `• <b>Speed:</b> 3-second continuous on-chain block scanner\n` +
+    `• <b>Sniper:</b> Automatic Anti-MEV 3-Tranche ladder entry with +0.3 Gwei priority tip!`;
+  await send(msg);
+}
+
+export async function handleChartCommand(chatId: number, tokenAddrOrSymbol: string): Promise<void> {
+  if (!tokenAddrOrSymbol) {
+    await send("ℹ️ Usage: <code>/chart &lt;token_address_or_symbol&gt;</code>");
+    return;
+  }
+  const links = formatChartZoneHtml(tokenAddrOrSymbol, "TOKEN");
+  await send(`📊 <b>Live Terminal Charts for <code>${tokenAddrOrSymbol}</code>:</b>\n\n${links}`);
 }
