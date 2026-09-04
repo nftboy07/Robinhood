@@ -1,3 +1,4 @@
+import { handleTrenchesCommand } from "../radar/robinhoodTrenches.js";
 import { handleVfatCommand } from "../radar/vfatYieldRadar.js";
 import { STOCK_TICKERS } from "../radar/stockyardScreener.js";
 import { formatChartZoneHtml } from "../radar/chartZoneRadar.js";
@@ -1767,4 +1768,8 @@ export async function handleChartCommand(chatId: number, tokenAddrOrSymbol: stri
 
 export async function handleVfatYieldCommand(): Promise<void> {
   await handleVfatCommand();
+}
+
+export async function handleTrenchesLiveCommand(): Promise<void> {
+  await handleTrenchesCommand();
 }

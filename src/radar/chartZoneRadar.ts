@@ -26,5 +26,5 @@ export function getChartZoneUrls(tokenAddress: string, symbol = "TOKEN"): ChartZ
 
 export function formatChartZoneHtml(tokenAddress: string, symbol: string): string {
   const urls = getChartZoneUrls(tokenAddress, symbol);
-  return `📊 <a href="${urls.chartUrl}">Chart.zone Live</a> | 🦅 <a href="${urls.dexScreenerUrl}">DexScreener</a> | 🔍 <a href="${urls.blockscoutUrl}">Explorer</a>`;
+  return `🏰 <a href="https://robinhoodtrenches.com/token/${addr}">Trenches</a> | 📊 <a href="${urls.chartUrl}">Chart.zone</a> | 🦅 <a href="${urls.dexScreenerUrl}">DexScreener</a> | 🔍 <a href="${urls.blockscoutUrl}">Explorer</a>`;
 }
