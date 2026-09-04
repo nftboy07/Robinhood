@@ -37,10 +37,10 @@
   "gasPriceGwei": 0,
   "watch": {
     "enabled": true,
-    "intervalSec": 30,
+    "intervalSec": 15,
     "minVol5m": 0,
-    "riseFactor": 1.15,
-    "minVol1h": 500,
+    "riseFactor": 1.05,
+    "minVol1h": 50,
     "minLiqUsd": 0,
     "maxTaxPct": 6,
     "cooldownMin": 60,
@@ -51,7 +51,7 @@
     "newToken": true,
     "positionMonitor": true,
     "autoCloseOutOfRange": true,
-    "newTokenMinWethSeed": 0.001,
+    "newTokenMinWethSeed": 0.0001,
     "activityThreshold": 3,
     "cooldownMin": 30
   },
@@ -63,7 +63,7 @@
   },
   "autoLp": {
     "enabled": true,
-    "sizeEth": 0.01,
+    "sizeEth": 0.0012,
     "mode": "buy",
     "minScore": 30,
     "requireAction": "watch",
