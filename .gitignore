@@ -7,3 +7,12 @@ bot.log
 .DS_Store
 .env.local
 config.local.json
+
+# Runtime state (P0 audit: keep bot state + history out of git)
+data/
+trades_history.json
+paper_trades_history.json
+paper_positions.json
+positions.json.tmp
+positions.json.corrupt.*
+config.smoke.json

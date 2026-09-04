@@ -366,7 +366,8 @@ async function initTelegram() {
         } else {
           await sendTg('Selling all positions...');
           for (const pos of [...positions]) {
-            await sellPosition(pos);
+            const r = await sellPosition(pos, 'MANUAL_ALL');
+            settleSale(pos, r);
           }
         }
       } else if (text === '/poll') {
@@ -489,7 +490,9 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
       } else if (text.startsWith('/sell ')) {
         const idx = parseInt(text.split(' ')[1]) - 1;
         if (positions[idx]) {
-          await sellPosition(positions[idx]);
+          const p0 = positions[idx];
+          const r = await sellPosition(p0, 'MANUAL');
+          settleSale(p0, r);
         } else {
           await sendTg('Invalid position index. Use /p to list.');
         }
@@ -635,9 +638,8 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
         for (const pos of [...positions]) {
           const moon = (pos.amount || 0n) * BigInt(Math.floor(STRATEGY.moonbagPct || 25)) / 100n;
           if (moon > 0n && (pos.amount - (pos.soldAmount || 0n)) > moon) {
-            const temp = {...pos, amount: moon};
-            await sellPosition(temp);
-            pos.soldAmount = (pos.soldAmount || 0n) + moon;
+            const r = await sellPosition(pos, 'MOONBAG', moon);
+            settleSale(pos, r);
           }
         }
         savePositions();
@@ -861,14 +863,17 @@ All outputs use live mainnet data (no dummy/zero unless real).`;
         } else {
           await sendTg('Selling all positions...');
           for (const pos of [...positions]) {
-            await sellPosition(pos);
+            const r = await sellPosition(pos, 'MANUAL_ALL');
+            settleSale(pos, r);
           }
         }
         await sendMainMenu(chatId, '✅ Sell All triggered');
       } else if (data.startsWith('sell_')) {
         const idx = parseInt(data.split('_')[1]);
         if (positions[idx]) {
-          await sellPosition(positions[idx]);
+          const p0 = positions[idx];
+          const r = await sellPosition(p0, 'MANUAL');
+          settleSale(p0, r);
           await sendTg(`Sold position ${idx + 1}`);
           await handlePositions(chatId); // refresh list
         }
@@ -1276,7 +1281,10 @@ async function buyToken(curveAddress, amountStr) {
       let tokenForBal = curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
       const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
-      let minOut = 0n;
+      // FIX #3: quote before sending so we can reject a badly moved market.
+      const preQuote = await estimateBuyOutput(curveAddress, buyAmount).catch(() => 0n);
+      const minOut = preQuote > 0n ? preQuote * BigInt(100 - SLIPPAGE_PCT) / 100n : 0n;
+
       let gasEst = 300000n;
       try {
         gasEst = await curve.buy.estimateGas(curveAddress, { value: buyAmount });
@@ -1284,13 +1292,16 @@ async function buyToken(curveAddress, amountStr) {
         // estimate may fail due to sim funds, use fixed
       }
 
-      const tx = await curve.buy(curveAddress, {
-        value: buyAmount,
-        gasLimit: gasEst * 140n / 100n,
-        maxFeePerGas: maxFee,
-        maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
+      const receipt = await withTxLock(async () => {
+        const tx = await curve.buy(curveAddress, {
+          value: buyAmount,
+          gasLimit: gasEst * 140n / 100n,
+          maxFeePerGas: maxFee,
+          maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
+        });
+        return await waitForReceipt(tx, 120000, 'manual buy');
       });
-      const receipt = await withTimeout(tx.wait(), 120000, 'buy tx.wait');
+      if (receipt.status === 0) throw new Error('buy reverted on-chain');
       txHash = receipt.hash || receipt.transactionHash || 'unknown';
       blockNumber = receipt.blockNumber;
       const txLink = `${EXPLORER}/tx/${txHash}`;
@@ -1314,10 +1325,13 @@ async function buyToken(curveAddress, amountStr) {
         return;
       }
 
-      entryPrice = await getCurrentPrice(curveAddress);
-      if (entryPrice === 0n && amount > 0n) {
-        entryPrice = (buyAmount * (10n ** 18n)) / amount;
+      // FIX #3: warn when the fill breached the slippage bound.
+      if (minOut > 0n && amount < minOut) {
+        logger.warn(`[SLIPPAGE] Manual buy filled below minOut (got ${ethers.formatEther(amount)}, wanted >= ${ethers.formatEther(minOut)})`);
+        await sendTg(`⚠️ Fill came in under the ${SLIPPAGE_PCT}% slippage bound.`);
       }
+      // Cost basis = ETH paid / tokens received, not the post-trade mid price.
+      entryPrice = (buyAmount * (10n ** 18n)) / amount;
 
       logger.info(`[BOUGHT] tx: ${txHash}`);
       await sendAlert(`✅ Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
@@ -1380,7 +1394,7 @@ async function forceBuy(curveAddress, amountStr) {
       let tokenForBal = curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
       const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
-      let minOut = 0n;
+      // /forcebuy deliberately bypasses honeypot + slippage checks.
       let gasEst = 300000n;
       try {
         gasEst = await curve.buy.estimateGas(curveAddress, { value: buyAmount });
@@ -1388,13 +1402,16 @@ async function forceBuy(curveAddress, amountStr) {
         gasEst = 300000n;
       }
 
-      const tx = await curve.buy(curveAddress, {
-        value: buyAmount,
-        gasLimit: gasEst * 150n / 100n,
-        maxFeePerGas: maxFee,
-        maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
+      const receipt = await withTxLock(async () => {
+        const tx = await curve.buy(curveAddress, {
+          value: buyAmount,
+          gasLimit: gasEst * 150n / 100n,
+          maxFeePerGas: maxFee,
+          maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
+        });
+        return await waitForReceipt(tx, 120000, 'force buy');
       });
-      const receipt = await withTimeout(tx.wait(), 120000, 'forcebuy tx.wait');
+      if (receipt.status === 0) throw new Error('force buy reverted on-chain');
       txHash = receipt.hash || receipt.transactionHash || 'unknown';
       blockNumber = receipt.blockNumber;
       const txLink = `${EXPLORER}/tx/${txHash}`;
@@ -1415,10 +1432,8 @@ async function forceBuy(curveAddress, amountStr) {
         await sendTg(`⚠️ Force buy tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue. <a href="${txLink}">Check tx</a>`);
         return;
       }
-      entryPrice = await getCurrentPrice(curveAddress);
-      if (entryPrice === 0n && amount > 0n) {
-        entryPrice = (buyAmount * (10n ** 18n)) / amount;
-      }
+      // Cost basis = ETH paid / tokens received.
+      entryPrice = (buyAmount * (10n ** 18n)) / amount;
 
       logger.info(`[FORCE BOUGHT] tx: ${txHash}`);
       await sendAlert(`✅ Force Bought ${amountStr} ETH on ${curveAddress}\nTx: ${txHash}\n${txLink}`);
@@ -1859,8 +1874,8 @@ function getPositionsFile() {
 }
 
 function loadPositions() {
+  const file = getPositionsFile();
   try {
-    const file = getPositionsFile();
     if (fs.existsSync(file)) {
       const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
       positions = raw.map(p => ({
@@ -1885,10 +1900,24 @@ function loadPositions() {
     } else {
       positions = [];
     }
-  } catch (e) {}
+  } catch (e) {
+    // FIX #6: never silently pretend we hold nothing - real bags may be on-chain.
+    logger.error(`[STATE] FAILED to load positions from ${file}: ${e.message}`);
+    try {
+      const backup = `${file}.corrupt.${Date.now()}`;
+      if (fs.existsSync(file)) fs.copyFileSync(file, backup);
+      logger.error(`[STATE] Corrupt positions file preserved at ${backup}`);
+    } catch {}
+    throw new Error(
+      `Refusing to start: positions file ${file} exists but could not be parsed. ` +
+      `Inspect/repair it (a copy was saved) or move it aside if you truly hold nothing.`
+    );
+  }
 }
 
+// FIX #6: atomic write - a crash mid-write must not truncate the live positions file.
 function savePositions() {
+  const file = getPositionsFile();
   try {
     const serial = positions.map(p => ({
       ...p,
@@ -1898,8 +1927,81 @@ function savePositions() {
       soldAmount: (p.soldAmount || 0n).toString(),
       reEntries: p.reEntries || 0
     }));
-    fs.writeFileSync(getPositionsFile(), JSON.stringify(serial, null, 2));
-  } catch (e) {}
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(serial, null, 2));
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    logger.error(`[STATE] CRITICAL: failed to persist positions to ${file}: ${e.message}`);
+    sendAlert(`🚨 CRITICAL: cannot save positions (${e.message.slice(0, 80)}). State may be lost on restart.`).catch(() => {});
+  }
+}
+
+// FIX #2: the bonding-curve factory pulls tokens via transferFrom - it needs an allowance.
+async function ensureApproval(tokenAddr, spender, amount) {
+  const erc20 = new ethers.Contract(tokenAddr, [
+    'function allowance(address owner, address spender) view returns (uint256)',
+    'function approve(address spender, uint256 amount) returns (bool)'
+  ], wallet);
+  const current = await erc20.allowance(wallet.address, spender).catch(() => 0n);
+  if (current >= amount) return true;
+  logger.info(`[APPROVE] Approving ${spender} for ${tokenAddr}...`);
+  const tx = await erc20.approve(spender, ethers.MaxUint256, { gasLimit: 120000 });
+  await withTimeout(tx.wait(), 120000, 'approve tx.wait');
+  logger.info(`[APPROVE] Approved ${spender} for ${tokenAddr}`);
+  return true;
+}
+
+// FIX #11: a tx.wait() timeout does NOT mean the tx failed - it may still land.
+async function waitForReceipt(tx, ms, label) {
+  try {
+    return await withTimeout(tx.wait(), ms, label);
+  } catch (e) {
+    if (!String(e.message || '').includes('timed out')) throw e;
+    logger.warn(`[TX] ${label} wait timed out - polling for receipt on ${tx.hash}`);
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const rec = await directProvider.getTransactionReceipt(tx.hash).catch(() => null);
+      if (rec) {
+        logger.info(`[TX] ${label} landed after timeout: ${tx.hash}`);
+        return rec;
+      }
+    }
+    throw new Error(`${label}: no receipt for ${tx.hash} after extended polling - tx may still be pending`);
+  }
+}
+
+// FIX #13: serialize all wallet sends so concurrent paths can't collide on a nonce.
+let _txQueue = Promise.resolve();
+let _txLockHeld = false;
+function withTxLock(fn) {
+  // Reentrancy pass-through: a nested call would otherwise wait on a queue entry
+  // that can only complete once the nested call finishes (deadlock).
+  if (_txLockHeld) return Promise.resolve().then(fn);
+  const run = _txQueue.then(async () => {
+    _txLockHeld = true;
+    try { return await fn(); } finally { _txLockHeld = false; }
+  });
+  _txQueue = run.then(() => {}, () => {});
+  return run;
+}
+
+// FIX #5: persistent dedupe so a re-scanned block never re-buys the same launch.
+const processedLaunches = new Set();
+function alreadyProcessed(key) {
+  const k = String(key).toLowerCase();
+  if (processedLaunches.has(k)) return true;
+  processedLaunches.add(k);
+  if (processedLaunches.size > 5000) {
+    for (const v of processedLaunches) { processedLaunches.delete(v); break; }
+  }
+  return false;
+}
+
+function hasPosition(addr) {
+  if (!addr) return false;
+  const a = addr.toLowerCase();
+  return positions.some(p => ((p.token || p.curve) || '').toLowerCase() === a
+    || ((p.curve || p.token) || '').toLowerCase() === a);
 }
 
 async function withRetry(fn, retries = 3, timeoutMs = 15000) {
@@ -2556,32 +2658,60 @@ async function isV4Honeypot(tokenAddr, display, poolKey, buyAmount) {
 }
 
 // Check daily risk limits
-function checkRiskLimits() {
+// FIX #4: this was defined but NEVER called, and its maths were wrong.
+// Now enforced at every entry point, with a real rolling hourly window and a
+// daily loss measured as a % of the session-start balance.
+let hourlyTrades = [];              // timestamps of entries in the last hour
+globalThis.sessionStartBalanceEth = 0;
+
+function checkRiskLimits(reason = 'entry') {
   const now = Date.now();
-  const hoursSinceStart = (now - dailyStats.startTime) / (1000 * 3600);
 
-  // Reset daily stats every 24h
-  if (hoursSinceStart > 24) {
+  // Roll the 24h window
+  if ((now - dailyStats.startTime) / (1000 * 3600) > 24) {
     dailyStats = { startTime: now, trades: 0, realizedPnl: 0, lastTradeHour: 0 };
+    logger.info('[RISK] 24h window rolled - daily stats reset');
   }
 
-  const currentHour = Math.floor(now / (1000 * 3600));
-  if (currentHour !== dailyStats.lastTradeHour) {
-    dailyStats.lastTradeHour = currentHour;
-    // could reset hourly counters here
-  }
-
-  if (dailyStats.trades >= MAX_TRADES_PER_HOUR) {
-    logger.warn('Max trades per hour reached');
+  if (isPaused) {
+    logger.warn(`[RISK] Bot is paused - blocking ${reason}`);
     return false;
   }
 
-  const lossPct = dailyStats.realizedPnl < 0 ? Math.abs(dailyStats.realizedPnl / 1) * 100 : 0; // rough
-  if (lossPct > MAX_DAILY_LOSS_PCT) {
-    logger.warn('Daily loss limit hit');
+  // FIX #4: real rolling 1h window (was comparing a 24h counter).
+  hourlyTrades = hourlyTrades.filter(t => now - t < 3600 * 1000);
+  if (hourlyTrades.length >= MAX_TRADES_PER_HOUR) {
+    logger.warn(`[RISK] Max trades/hour (${MAX_TRADES_PER_HOUR}) reached - blocking ${reason}`);
     return false;
   }
+
+  // FIX #4: enforce concurrent position cap (was never checked anywhere).
+  if (positions.length >= MAX_POS) {
+    logger.warn(`[RISK] Max concurrent positions (${MAX_POS}) reached - blocking ${reason}`);
+    return false;
+  }
+
+  // FIX #4: daily loss as a real percentage of the session-start balance
+  // (was `Math.abs(pnl / 1) * 100`, comparing absolute ETH to a percentage).
+  const base = globalThis.sessionStartBalanceEth || 0;
+  if (base > 0 && dailyStats.realizedPnl < 0) {
+    const lossPct = (Math.abs(dailyStats.realizedPnl) / base) * 100;
+    if (lossPct >= MAX_DAILY_LOSS_PCT) {
+      logger.error(`[RISK] Daily loss limit hit: -${lossPct.toFixed(2)}% >= ${MAX_DAILY_LOSS_PCT}% - HALTING ENTRIES`);
+      if (!isPaused) {
+        isPaused = true;
+        sendAlert(`🛑 <b>DAILY LOSS LIMIT HIT</b>\nDown ${lossPct.toFixed(2)}% (${dailyStats.realizedPnl.toFixed(5)} ETH).\nSniping auto-paused. Use /resume to override.`).catch(() => {});
+      }
+      return false;
+    }
+  }
+
   return true;
+}
+
+function recordEntry() {
+  hourlyTrades.push(Date.now());
+  dailyStats.trades++;
 }
 
 // Sell on DEX (Uniswap V2 style) after graduation
@@ -2670,6 +2800,20 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
     logger.info(`[PAUSED] Skipping snipe for ${sym}`);
     return;
   }
+  // FIX #4: enforce risk limits (position cap, trades/hour, daily loss).
+  if (!checkRiskLimits(`snipe ${sym}`)) return;
+
+  // FIX #5: never buy the same launch twice. The 400-block rescan window plus the
+  // mempool->poll trigger meant the same token could be sniped repeatedly.
+  if (hasPosition(curveAddress) || hasPosition(tokenAddr)) {
+    logger.info(`[SKIP SNIPE] Already holding a position in ${sym}`);
+    return;
+  }
+  if (alreadyProcessed(`snipe:${(tokenAddr || curveAddress).toLowerCase()}`)) {
+    logger.debug(`[SKIP SNIPE] ${sym} already processed this session`);
+    return;
+  }
+
   const bal = await getBalance();
   if (bal < SNIPE_AMOUNT * 2n) {
     logger.warn(`[SKIP SNIPE] Low balance ${ethers.formatEther(bal)} ETH`);
@@ -2738,28 +2882,41 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
       logger.info(`[PAPER BOUGHT] ${sym} tx: ${txHash}`);
       await sendTg(`🧪 <b>[PAPER TRADE]</b> Snipe bought <b>${sym}</b>\nEst. amount: ${ethers.formatEther(amount)}`);
     } else {
-      let minOut = 0n;
-      let gasEst;
-      try {
-        gasEst = await curve.buy.estimateGas(curveAddress, { value: SNIPE_AMOUNT });
-      } catch (e) {
-        minOut = 0n;
-        gasEst = await curve.buy.estimateGas(curveAddress, { value: SNIPE_AMOUNT });
+      // FIX #3: the curve's buy() has no minOut param, so enforce slippage
+      // off-chain: re-quote immediately before sending and abort if the price
+      // moved more than SLIPPAGE_PCT against the estimate we based the entry on.
+      const preQuote = await estimateBuyOutput(curveAddress, SNIPE_AMOUNT).catch(() => 0n);
+      if (estimated > 0n && preQuote > 0n) {
+        const minAcceptable = estimated * BigInt(100 - SLIPPAGE_PCT) / 100n;
+        if (preQuote < minAcceptable) {
+          const drift = 100 - Number((preQuote * 100n) / estimated);
+          logger.warn(`[SNIPE ABORT] ${sym} price moved ${drift}% against us (> ${SLIPPAGE_PCT}% slippage) - skipping`);
+          await sendTg(`⚠️ Aborted snipe on <b>${sym}</b>: price moved ${drift}% before execution (max ${SLIPPAGE_PCT}%).`);
+          return;
+        }
       }
+      const minOut = preQuote > 0n ? preQuote * BigInt(100 - SLIPPAGE_PCT) / 100n : 0n;
+
+      let gasEst = await curve.buy.estimateGas(curveAddress, { value: SNIPE_AMOUNT })
+        .catch(() => 300000n);
       const feeData = await provider.getFeeData();
       const maxFee = (feeData.maxFeePerGas || feeData.gasPrice) * BigInt(Math.floor(GAS_MULT * 100)) / 100n;
 
       let tokenForBal = tokenAddr || curveToToken.get(curveAddress.toLowerCase()) || curveAddress;
       const balBefore = await getTokenBalance(tokenForBal, wallet.address);
 
-      const tx = await curve.buy(curveAddress, {
-        value: SNIPE_AMOUNT,
-        gasLimit: gasEst * 145n / 100n,
-        maxFeePerGas: maxFee,
-        maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
+      // FIX #13: serialize sends so concurrent snipes/sells can't reuse a nonce.
+      const receipt = await withTxLock(async () => {
+        const tx = await curve.buy(curveAddress, {
+          value: SNIPE_AMOUNT,
+          gasLimit: gasEst * 145n / 100n,
+          maxFeePerGas: maxFee,
+          maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || (maxFee / 2n)
+        });
+        // FIX #11: a wait() timeout doesn't mean failure - poll for the receipt.
+        return await waitForReceipt(tx, 120000, 'snipe buy');
       });
-
-      const receipt = await withTimeout(tx.wait(), 120000, 'snipe tx.wait');
+      if (receipt.status === 0) throw new Error('snipe buy reverted on-chain');
       txHash = receipt.hash || receipt.transactionHash || 'unknown';
       blockNumber = receipt.blockNumber;
       logger.info(`[BOUGHT] ${sym} tx: ${txHash}`);
@@ -2780,17 +2937,30 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
         await sendTg(`⚠️ Snipe tx mined but no tokens received for ${curveAddress}. Wrong curve addr or contract issue.`);
         return;
       }
-      entryPrice = await getCurrentPrice(curveAddress);
-      if (entryPrice === 0n && amount > 0n) {
-        entryPrice = (SNIPE_AMOUNT * (10n ** 18n)) / amount;
+      // FIX #3: post-trade slippage check - we can't revert, but we must know
+      // (and alert) when we got a materially worse fill than quoted.
+      if (minOut > 0n && amount < minOut) {
+        const worse = 100 - Number((amount * 100n) / (minOut > 0n ? minOut : 1n));
+        logger.warn(`[SLIPPAGE] ${sym} filled ${worse}% below minOut - review size/slippage config`);
+        await sendTg(`⚠️ <b>${sym}</b> filled worse than the ${SLIPPAGE_PCT}% slippage bound. Got ${ethers.formatEther(amount)}, expected >= ${ethers.formatEther(minOut)}.`);
       }
-      
+
+      // FIX: entryPrice must be OUR actual cost basis (ETH paid / tokens received),
+      // not the post-trade curve mid-price - otherwise PnL starts skewed on entry.
+      entryPrice = (SNIPE_AMOUNT * (10n ** 18n)) / amount;
+
       const txLink = `${EXPLORER}/tx/${txHash}`;
       await sendTg(`✅ Bought <b>${sym}</b> on fun.noxa.fi/robinhood\nEst. amount: ${ethers.formatEther(amount)}\n<a href="${txLink}">View tx</a> | <a href="https://bullscan.fun/robinhood/token/${actualToken}">Bullscan</a>`);
       await sendAlert(`✅ Snipe bought ${symbol}\n${txLink}`);
     }
 
     const storedToken = actualToken || tokenAddr || curveAddress;
+    // FIX #5: guard against a concurrent path having opened this position already.
+    if (hasPosition(storedToken)) {
+      logger.warn(`[SNIPE] Position for ${storedToken} appeared concurrently - merging amount`);
+      const ex = positions.find(p => ((p.token || p.curve) || '').toLowerCase() === storedToken.toLowerCase());
+      if (ex) { ex.amount += amount; savePositions(); return; }
+    }
     positions.push({ 
       curve: curveAddress,
       token: storedToken, 
@@ -2806,11 +2976,11 @@ async function snipe(curveAddress, symbol = null, tokenAddr = null) {
       entryTime: Date.now(),
       isPaper: !!globalThis.paperTrading
     });
-    dailyStats.trades++;
+    recordEntry();
     savePositions();
   } catch (e) {
     logger.error(`[SNIPE FAIL] ${sym}: ${e.message}`);
-    await sendTg(`❌ Snipe failed ${sym}`);
+    await sendTg(`❌ Snipe failed ${sym}: ${String(e.message).slice(0, 120)}`);
   }
 }
 
@@ -2838,7 +3008,24 @@ function buildV4Swap({ zeroForOne, amountIn, amountOutMin, deadline, key }) {
   const commands = '0x10'; // CMD_V4_SWAP
 
   const value = zeroForOne ? amountIn : 0n;
-  return { commands, inputs: [v4Input], deadline, value };
+  return { commands, inputs: [v4Input], deadline, value, amountOutMin };
+}
+
+// FIX #3: V4 buys hardcoded amountOutMin = 1 wei (zero protection). Quote first
+// so we can pass a real on-chain minimum the pool must honour.
+async function quoteV4Out(poolKey, zeroForOne, amountIn) {
+  try {
+    const quoterAddr = config.v4Quoter || '0x8dc178efb8111bb0973dd9d722ebeff267c98f94';
+    const quoter = new ethers.Contract(quoterAddr, [
+      'function quoteExactInputSingle((address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks) params, bool zeroForOne, uint256 amountIn, bytes hookData) external returns (uint256 amountOut, uint160 sqrtPriceX96After, int24 initializedTicksCrossed, uint256 gasEstimate)'
+    ], provider);
+    const keyTuple = [poolKey.currency0, poolKey.currency1, poolKey.fee, poolKey.tickSpacing, poolKey.hooks];
+    const q = await quoter.quoteExactInputSingle.staticCall(keyTuple, zeroForOne, amountIn, '0x');
+    return q ? q.amountOut : 0n;
+  } catch (e) {
+    logger.debug(`[V4 QUOTE] failed: ${e.message.slice(0, 80)}`);
+    return 0n;
+  }
 }
 
 function getV4PoolKeyFromReceipt(receipt, tokenAddr) {
@@ -2878,6 +3065,21 @@ async function snipeV4(tokenAddr, display, poolKey, overrideAmountStr = null) {
   const buyAmount = overrideAmountStr 
     ? ethers.parseEther(overrideAmountStr)
     : SNIPE_AMOUNT;
+
+  // FIX #4/#5: same guards as the curve path - manual buys pass an override and
+  // are allowed to bypass the auto-snipe dedupe.
+  const isManualV4 = !!overrideAmountStr;
+  if (!isManualV4) {
+    if (!checkRiskLimits(`snipeV4 ${display}`)) return;
+    if (hasPosition(tokenAddr)) {
+      logger.info(`[SKIP SNIPE V4] Already holding a position in ${display}`);
+      return;
+    }
+    if (alreadyProcessed(`snipev4:${tokenAddr.toLowerCase()}`)) {
+      logger.debug(`[SKIP SNIPE V4] ${display} already processed this session`);
+      return;
+    }
+  }
 
   const bal = await getBalance();
   if (bal < buyAmount * 2n) {
@@ -2921,10 +3123,20 @@ async function snipeV4(tokenAddr, display, poolKey, overrideAmountStr = null) {
   
   try {
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
+
+    // FIX #3: derive a real on-chain minimum instead of the old 1-wei placeholder.
+    const v4Quote = await quoteV4Out(poolKey, true, buyAmount);
+    const v4MinOut = v4Quote > 0n ? (v4Quote * BigInt(100 - SLIPPAGE_PCT)) / 100n : 1n;
+    if (v4Quote > 0n) {
+      logger.info(`[V4 QUOTE] ${display}: expect ${ethers.formatEther(v4Quote)}, minOut ${ethers.formatEther(v4MinOut)} (${SLIPPAGE_PCT}% slippage)`);
+    } else {
+      logger.warn(`[V4 QUOTE] No quote for ${display} - proceeding with minimal protection`);
+    }
+
     const sw = buildV4Swap({
       zeroForOne: true,
       amountIn: buyAmount,
-      amountOutMin: 1n, // 1 wei minimum
+      amountOutMin: v4MinOut,
       deadline,
       key: poolKey
     });
@@ -2943,28 +3155,40 @@ async function snipeV4(tokenAddr, display, poolKey, overrideAmountStr = null) {
     // Get balance before swap
     const balBefore = await getTokenBalance(tokenAddr, wallet.address);
 
-    const tx = await routerContract.execute(sw.commands, sw.inputs, sw.deadline, {
-      value: sw.value,
-      maxFeePerGas: maxFee,
-      maxPriorityFeePerGas: maxPriority,
-      gasLimit: 850000n
+    // FIX #13: serialize the send; FIX #11: survive a wait() timeout.
+    const receipt = await withTxLock(async () => {
+      const tx = await routerContract.execute(sw.commands, sw.inputs, sw.deadline, {
+        value: sw.value,
+        maxFeePerGas: maxFee,
+        maxPriorityFeePerGas: maxPriority,
+        gasLimit: 850000n
+      });
+      logger.info(`[V4 SWAP SUBMITTED] Hash: ${tx.hash}`);
+      sendTg(`🚀 <b>[V4 SWAP]</b> Submitted buy swap for <b>${display}</b> on Uniswap V4 pool:\nTx: <a href="${EXPLORER}/tx/${tx.hash}">${tx.hash.slice(0, 10)}...${tx.hash.slice(-6)}</a>`, { parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => {});
+      return await waitForReceipt(tx, 120000, 'v4 buy');
     });
-
-    logger.info(`[V4 SWAP SUBMITTED] Hash: ${tx.hash}`);
-    await sendTg(`🚀 <b>[V4 SWAP]</b> Submitted buy swap for <b>${display}</b> on Uniswap V4 pool:\nTx: <a href="${EXPLORER}/tx/${tx.hash}">${tx.hash.slice(0, 10)}...${tx.hash.slice(-6)}</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
-
-    const receipt = await tx.wait();
     logger.info(`[V4 SWAP MINED] Status: ${receipt.status} | Block: ${receipt.blockNumber}`);
-    
+    if (receipt.status === 0) throw new Error('v4 buy reverted on-chain');
+
     // Get balance after swap
     const balAfter = await getTokenBalance(tokenAddr, wallet.address);
     const amount = balAfter > balBefore ? (balAfter - balBefore) : 0n;
 
     if (amount === 0n) {
       logger.warn(`[V4 SNIPE] No tokens received for ${display}`);
-      await sendTg(`⚠️ V4 Snipe tx mined but no tokens received for ${display}. <a href="${EXPLORER}/tx/${tx.hash}">Check tx</a>`);
+      await sendTg(`⚠️ V4 Snipe tx mined but no tokens received for ${display}. <a href="${EXPLORER}/tx/${receipt.hash}">Check tx</a>`);
       return;
     }
+
+    // FIX #3: post-trade slippage check against the pre-trade quote.
+    if (sw.amountOutMin && sw.amountOutMin > 0n && amount < sw.amountOutMin) {
+      logger.warn(`[V4 SLIPPAGE] ${display} filled below amountOutMin (got ${ethers.formatEther(amount)})`);
+      await sendTg(`⚠️ <b>${display}</b> V4 fill came in under the ${SLIPPAGE_PCT}% slippage bound.`);
+    }
+
+    // FIX: record a real cost basis. entryPrice was hardcoded 0n, which makes
+    // every PnL / SL / TP calculation on V4 positions meaningless.
+    const v4EntryPrice = (buyAmount * (10n ** 18n)) / amount;
 
     // Log position to JSON
     positions.push({
@@ -2972,8 +3196,8 @@ async function snipeV4(tokenAddr, display, poolKey, overrideAmountStr = null) {
       token: tokenAddr.toLowerCase(),
       symbol: display,
       amount,
-      entryPrice: 0n,
-      highestPrice: 0n,
+      entryPrice: v4EntryPrice,
+      highestPrice: v4EntryPrice,
       isMigrated: true, // Bypass SL/TP/Trailing stop check loop
       entryBlock: receipt.blockNumber,
       soldAmount: 0n,
@@ -2983,6 +3207,7 @@ async function snipeV4(tokenAddr, display, poolKey, overrideAmountStr = null) {
       isPaper: false,
       isV4: true // flag for V4
     });
+    recordEntry();
     savePositions();
 
     await sendTg(`✅ <b>[V4 SWAP MINED]</b> Successfully bought <b>${display}</b> at block ${receipt.blockNumber}!\n⚠️ <i>You can manage this position and sell manually using the /p menu.</i>`, { parse_mode: 'HTML' });
@@ -3079,15 +3304,8 @@ async function sellV4(pos, sellAmt, exitType = 'MANUAL') {
     logger.info(`[PAPER V4 SELL] ${display} | token: ${tokenAddr}`);
     await sendTg(`🧪 <b>[PAPER TRADE] [V4 SELL]</b> Sold <b>${display}</b> on Uniswap V4 pool.`);
     
-    const original = positions.find(p => (p.token || p.curve).toLowerCase() === tokenAddr.toLowerCase());
-    if (original) {
-      const remaining = original.amount - (original.soldAmount || 0n) - sellAmt;
-      if (remaining <= 0n) {
-        positions = positions.filter(p => (p.token || p.curve).toLowerCase() !== tokenAddr.toLowerCase());
-      }
-    }
-    savePositions();
-    return;
+    // Caller (sellPosition -> settleSale) owns soldAmount / position removal.
+    return { ok: true, txHash: null, amount: sellAmt };
   }
 
   logger.info(`[V4 SELL] ${display} | token: ${tokenAddr} | amount: ${ethers.formatEther(sellAmt)}`);
@@ -3105,10 +3323,13 @@ async function sellV4(pos, sellAmt, exitType = 'MANUAL') {
 
     // 3. Build V4 sell swap (zeroForOne = false)
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
+    // FIX #3: real minimum ETH out instead of the 1-wei placeholder.
+    const sellQuote = await quoteV4Out(poolKey, false, sellAmt);
+    const sellMinOut = sellQuote > 0n ? (sellQuote * BigInt(100 - SLIPPAGE_PCT)) / 100n : 1n;
     const sw = buildV4Swap({
       zeroForOne: false,
       amountIn: sellAmt,
-      amountOutMin: 1n, // 1 wei minimum
+      amountOutMin: sellMinOut,
       deadline,
       key: poolKey
     });
@@ -3134,37 +3355,49 @@ async function sellV4(pos, sellAmt, exitType = 'MANUAL') {
     logger.info(`[V4 SELL SUBMITTED] Hash: ${tx.hash}`);
     await sendTg(`🚀 <b>[V4 SELL]</b> Submitted sell swap for <b>${display}</b> on Uniswap V4 pool:\nTx: <a href="${EXPLORER}/tx/${tx.hash}">${tx.hash.slice(0, 10)}...${tx.hash.slice(-6)}</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
 
-    const receipt = await tx.wait();
+    const receipt = await waitForReceipt(tx, 120000, 'v4 sell');
     logger.info(`[V4 SELL MINED] Status: ${receipt.status} | Block: ${receipt.blockNumber}`);
+    if (receipt.status === 0) throw new Error('v4 sell reverted on-chain');
 
-    // Update positions array
-    const original = positions.find(p => (p.token || p.curve).toLowerCase() === tokenAddr.toLowerCase());
-    if (original) {
-      const remaining = original.amount - (original.soldAmount || 0n) - sellAmt;
-      if (remaining <= 0n) {
-        positions = positions.filter(p => (p.token || p.curve).toLowerCase() !== tokenAddr.toLowerCase());
-      }
-    }
-    savePositions();
+    // FIX #1: caller settles soldAmount and closes the position when fully exited.
+    logTradeToHistory(pos, sellAmt, await getLivePrice(tokenAddr, tokenAddr).catch(() => 0n),
+      receipt.hash || receipt.transactionHash, exitType);
 
     await sendTg(`✅ <b>[V4 SELL MINED]</b> Successfully sold <b>${display}</b> at block ${receipt.blockNumber}!`, { parse_mode: 'HTML' });
+    return { ok: true, txHash: receipt.hash || receipt.transactionHash, amount: sellAmt };
 
   } catch (err) {
     logger.error(`[V4 SELL ERROR] failed: ${err.message}`);
     await sendTg(`❌ <b>[V4 SELL FAILED]</b> for <b>${display}</b>:\nError: <code>${err.message}</code>`);
+    return { ok: false, txHash: null, amount: 0n };
   }
 }
 
 // ====================== SELL ======================
-async function sellPosition(pos, exitType = 'MANUAL') {
+/**
+ * Sell part or all of a position.
+ * FIX #1: this NO LONGER removes the position from `positions`. It returns
+ * { ok, txHash, amount } and the caller (settleSale) updates soldAmount and
+ * decides whether the position is fully closed. Partial sells used to wipe the
+ * whole position from state, orphaning the remainder with no SL/TP.
+ */
+async function sellPosition(pos, exitType = 'MANUAL', sellAmtOverride = null) {
   const posCurve = pos.curve || pos.token;
   const posKey = pos.token || pos.curve;
-  const sellAmt = pos.amount;
+  // FIX #8: default to the UNSOLD remainder, never the original size.
+  const sellAmt = sellAmtOverride !== null
+    ? sellAmtOverride
+    : (pos.amount - (pos.soldAmount || 0n));
+
+  if (sellAmt <= 0n) {
+    logger.debug(`[SELL] Nothing left to sell for ${pos.symbol}`);
+    return { ok: false, txHash: null, amount: 0n };
+  }
 
   const isV4Pool = pos.isV4 || (await resolveV4PoolKey(posKey)) !== null;
   if (isV4Pool) {
-    await sellV4(pos, sellAmt, exitType);
-    return;
+    const r = await withTxLock(() => sellV4(pos, sellAmt, exitType));
+    return r || { ok: false, txHash: null, amount: 0n };
   }
 
   if (pos.isPaper || globalThis.paperTrading) {
@@ -3174,62 +3407,84 @@ async function sellPosition(pos, exitType = 'MANUAL') {
     await sendTg(`🧪 <b>[PAPER TRADE]</b> Sold <b>${pos.symbol}</b>`);
     
     logTradeToHistory(pos, sellAmt, exitPrice, txHash, exitType);
-    
-    positions = positions.filter(p => (p.token || p.curve) !== posKey);
-    savePositions();
-    return;
+    return { ok: true, txHash, amount: sellAmt };
   }
 
   // Graduated token: try DEX sell (sellOnDex silently skips if no pool exists)
   if (pos.isMigrated && ROUTER && WETH) {
     const exitPrice = await getLivePrice(posKey, posCurve);
-    const txHash = await sellOnDex(posKey, sellAmt);
+    const txHash = await withTxLock(() => sellOnDex(posKey, sellAmt));
     if (txHash) {
       logTradeToHistory(pos, sellAmt, exitPrice, txHash, exitType);
-      positions = positions.filter(p => (p.token || p.curve) !== posKey);
-      savePositions();
+      return { ok: true, txHash, amount: sellAmt };
     }
-    // If null: pool doesn't exist yet - silent hold, manageSafeStrategy skips graduated
-    return;
+    // If null: pool doesn't exist yet - silent hold
+    return { ok: false, txHash: null, amount: 0n };
   }
   // If graduated but no ROUTER/WETH configured: skip - position stays, no SL loop
   if (pos.isMigrated && (!ROUTER || !WETH)) {
     logger.debug(`[GRADUATED HOLD] ${pos.symbol} - no DEX configured, skipping sell`);
-    return;
+    return { ok: false, txHash: null, amount: 0n };
   }
 
-  const curve = new ethers.Contract(FACTORY, curveABI, wallet);
   try {
     const exitPrice = await getLivePrice(posKey, posCurve);
-    const tx = await curve.sell(posKey, sellAmt, { gasLimit: 550000 });
-    const receipt = await tx.wait();
-    const txHash = receipt.hash || receipt.transactionHash;
-    logger.info(`[SOLD] ${pos.symbol}`);
-    await sendTg(`💰 Sold <b>${pos.symbol}</b>`);
-    
+    const txHash = await withTxLock(async () => {
+      // FIX #2: the factory pulls tokens via transferFrom - approve before selling,
+      // otherwise EVERY curve sell reverts and risk management silently dies.
+      await ensureApproval(posKey, FACTORY, sellAmt);
+      const curve = new ethers.Contract(FACTORY, curveABI, wallet);
+      let gasEst = 550000n;
+      try {
+        gasEst = (await curve.sell.estimateGas(posKey, sellAmt)) * 140n / 100n;
+      } catch { /* keep conservative default */ }
+      const tx = await curve.sell(posKey, sellAmt, { gasLimit: gasEst });
+      const receipt = await waitForReceipt(tx, 120000, 'curve sell');
+      if (receipt.status === 0) throw new Error('curve sell reverted on-chain');
+      return receipt.hash || receipt.transactionHash;
+    });
+    logger.info(`[SOLD] ${pos.symbol} amount=${ethers.formatEther(sellAmt)}`);
+    await sendTg(`💰 Sold <b>${pos.symbol}</b> (${exitType})`);
     logTradeToHistory(pos, sellAmt, exitPrice, txHash, exitType);
-    
-    const key = pos.token || pos.curve; positions = positions.filter(p => (p.token || p.curve) !== key);
-    savePositions();
+    return { ok: true, txHash, amount: sellAmt };
   } catch (e) {
     logger.error(`Sell error on curve: ${e.message}`);
+    // FIX #2: do NOT set isMigrated on a generic failure. That flag gates
+    // manageSafeStrategy and a false positive permanently disables SL/TP.
     if (ROUTER && WETH) {
-      // Curve sell failed - attempt DEX fallback
-      pos.isMigrated = true;
       const exitPrice = await getLivePrice(posKey, posCurve);
-      const txHash = await sellOnDex(posKey, sellAmt);
+      const txHash = await withTxLock(() => sellOnDex(posKey, sellAmt));
       if (txHash) {
         logTradeToHistory(pos, sellAmt, exitPrice, txHash, exitType);
-        const key = pos.token || pos.curve; positions = positions.filter(p => (p.token || p.curve) !== key);
-        savePositions();
+        return { ok: true, txHash, amount: sellAmt };
       }
-    } else {
-      // No DEX - pause SL monitoring to prevent infinite retry loop
-      pos.slPaused = true;
-      savePositions();
-      await sendTg(`⚠️ Sell failed for <b>${pos.symbol}</b>: ${e.message.slice(0, 80)}\nSL paused - sell manually.`);
     }
+    pos.sellFailures = (pos.sellFailures || 0) + 1;
+    if (pos.sellFailures >= 3) {
+      pos.slPaused = true;
+      await sendTg(`⚠️ Sell failed 3x for <b>${pos.symbol}</b>: ${e.message.slice(0, 80)}\nAuto-sell paused - sell manually.`);
+    }
+    savePositions();
+    return { ok: false, txHash: null, amount: 0n };
   }
+}
+
+/**
+ * FIX #1: single place that records a fill and closes the position only when
+ * the entire size is actually gone. Partial sells previously wiped the whole
+ * position from state, orphaning the remainder with no SL/TP.
+ */
+function settleSale(pos, result, { closeOnFull = true } = {}) {
+  if (!result || !result.ok || result.amount <= 0n) return false;
+  pos.soldAmount = (pos.soldAmount || 0n) + result.amount;
+  pos.sellFailures = 0;
+  if (closeOnFull && (pos.amount - pos.soldAmount) <= 0n) {
+    const key = (pos.token || pos.curve || '').toLowerCase();
+    positions = positions.filter(p => ((p.token || p.curve) || '').toLowerCase() !== key);
+    logger.info(`[CLOSED] ${pos.symbol} fully exited`);
+  }
+  savePositions();
+  return true;
 }
 
 async function sellPercent(pos, pct) {
@@ -3240,10 +3495,8 @@ async function sellPercent(pos, pct) {
   }
   let sellAmt = remaining * BigInt(Math.floor(pct)) / 100n;
   if (sellAmt > 0n) {
-    const temp = { ...pos, amount: sellAmt };
-    await sellPosition(temp);
-    pos.soldAmount = (pos.soldAmount || 0n) + sellAmt;
-    savePositions();
+    const result = await sellPosition(pos, 'MANUAL_PCT', sellAmt);
+    settleSale(pos, result);
   }
 }
 
@@ -3267,12 +3520,9 @@ async function sellByAddr(addr, pct = 100) {
     return;
   }
   let sellAmt = remaining * BigInt(Math.floor(pct)) / 100n;
-  const temp = { ...pos, amount: sellAmt };
-  await sellPosition(temp);
-  if (pos.soldAmount !== undefined) {
-    pos.soldAmount = (pos.soldAmount || 0n) + sellAmt;
-    savePositions();
-  }
+  const tracked = positions.includes(pos);
+  const result = await sellPosition(pos, 'MANUAL_ADDR', sellAmt);
+  if (tracked) settleSale(pos, result);
 }
 
 // ====================== MONITOR ======================
@@ -3339,7 +3589,8 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
     if (ageSecs >= TIME_LIMIT_SECS) {
       logger.info(`[TIME EXIT] ${pos.symbol} reached time limit of ${TIME_LIMIT_SECS}s (${ageSecs}s) - executing auto-exit`);
       await sendTg(`⏳ <b>Time limit reached</b> for ${pos.symbol} (${Math.floor(ageSecs/60)}m) - executing auto-exit`);
-      await sellPosition(pos, 'TIME_LIMIT');
+      const rTime = await sellPosition(pos, 'TIME_LIMIT', remainingAmount);
+      settleSale(pos, rTime);
       return;
     }
   }
@@ -3351,31 +3602,44 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
     return;
   }
 
-  const peak = Number(pos.highestPrice);
-  const trailingPrice = peak * (1 - TRAILING);
+  // FIX #7: stay in BigInt. Number(wei) loses precision above 2^53 and
+  // BigInt(Math.floor(float)) can throw RangeError - which the monitor swallowed
+  // at debug level, silently killing the trailing stop.
+  const TRAIL_BPS = BigInt(Math.round(TRAILING * 10000));
+  const trailingPrice = (pos.highestPrice * (10000n - TRAIL_BPS)) / 10000n;
 
   // Calculate moonbag: never sell below this % of original position
   const moonbagPct = STRATEGY.moonbagPct || 25;
   const moonbagAmount = (pos.amount * BigInt(moonbagPct)) / 100n;
   const sellableAmount = remainingAmount > moonbagAmount ? remainingAmount - moonbagAmount : 0n;
 
-  if (sellableAmount <= 0n) {
-    logger.debug(`[MOONBAG] ${pos.symbol} - moonbag only, holding.`);
-    return;
-  }
-
-  // 1. Hard Stop Loss
+  // 1. Hard Stop Loss - checked BEFORE the moonbag guard.
+  // FIX #8: sell the unsold REMAINDER, not pos.amount. After any TP fired, the old
+  // code tried to sell more than we hold -> revert -> position left unmanaged.
+  // Capital protection overrides the moonbag: a -15% stop must always be able to exit.
   if (pnlPct <= -STOP_LOSS * 100) {
     logger.info(`[SL] ${pos.symbol} PnL ${pnlPct.toFixed(1)}% - Selling for capital protection`);
     await sendTg(`🛡️ SL hit on <b>${pos.symbol}</b> (${pnlPct.toFixed(1)}%) - Protecting capital`);
-    await sellPosition(pos, 'STOP_LOSS');
+    const result = await sellPosition(pos, 'STOP_LOSS', remainingAmount);
+    settleSale(pos, result);
+    return;
+  }
+
+  if (sellableAmount <= 0n) {
+    logger.debug(`[MOONBAG] ${pos.symbol} - moonbag only, holding.`);
     return;
   }
 
   // 2. TP Ladder (partial sells for safe profits) - respect moonbag
   const tpLadder = STRATEGY.tpLadder || [0.5, 1.0, 2.0];
   const sellPercents = STRATEGY.tpSellPercents || [30, 30, 40];
-  const currentMultiplier = currentPrice / entryPrice;
+  // FIX: currentPrice is BigInt and entryPrice is Number - dividing them threw
+  // "Cannot mix BigInt and other types", which the monitor swallowed at debug
+  // level. The entire TP ladder never executed. Compare as a ratio in basis points.
+  const entryPriceBig = pos.entryPrice;
+  const currentMultiplier = entryPriceBig > 0n
+    ? Number((currentPrice * 10000n) / entryPriceBig) / 10000
+    : 0;
 
   for (let i = 0; i < tpLadder.length; i++) {
     const target = tpLadder[i];
@@ -3390,37 +3654,43 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
         logger.info(`[TP${i+1}] ${pos.symbol} reached ${target}x - Selling ${sellPct}% (leaving moonbag)`);
         await sendTg(`💰 TP${i+1} hit on ${pos.symbol} (${(target*100).toFixed(0)}% gain) - Selling ${sellPct}% , moonbag kept`);
         
-        const tempPos = {...pos, amount: sellAmount};
-        await sellPosition(tempPos, 'TAKE_PROFIT');
-        
-        pos.soldAmount = (pos.soldAmount || 0n) + sellAmount;
-        pos.tpReached = pos.tpReached || [];
-        pos.tpReached.push(i);
-        
-        savePositions();
-        remainingAmount = pos.amount - (pos.soldAmount || 0n);
+        // FIX #1: sell against the real position; settleSale updates soldAmount
+        // and only closes when fully exited.
+        const result = await sellPosition(pos, 'TAKE_PROFIT', sellAmount);
+        if (settleSale(pos, result)) {
+          pos.tpReached = pos.tpReached || [];
+          pos.tpReached.push(i);
+          savePositions();
+          remainingAmount = pos.amount - (pos.soldAmount || 0n);
+          if (remainingAmount <= 0n) return;
+        } else {
+          logger.warn(`[TP${i+1}] Sell failed for ${pos.symbol} - not marking TP as reached`);
+          break;
+        }
       }
     }
   }
 
   // 3. Trailing Stop (lock profits on remaining, but leave moonbag)
-  if (currentPrice < BigInt(Math.floor(trailingPrice)) && (pos.soldAmount || 0n) < pos.amount) {
-    let sellAmount = remainingAmount - moonbagAmount;
+  // FIX #7: trailingPrice is now BigInt - compare directly, no Math.floor cast.
+  // Only trail once we are actually in profit, otherwise the SL owns the exit.
+  if (currentPrice < trailingPrice && currentMultiplier > 1 && remainingAmount > moonbagAmount) {
+    const sellAmount = remainingAmount - moonbagAmount;
     if (sellAmount > 0n) {
       logger.info(`[TRAILING] ${pos.symbol} dropped below peak - Selling to moonbag`);
       await sendTg(`📉 Trailing stop on ${pos.symbol} - Selling to ${moonbagPct}% moonbag`);
-      const tempPos = {...pos, amount: sellAmount};
-      await sellPosition(tempPos, 'TRAILING_STOP');
-      pos.soldAmount = (pos.soldAmount || 0n) + sellAmount;
-      savePositions();
+      const result = await sellPosition(pos, 'TRAILING_STOP', sellAmount);
+      settleSale(pos, result);
     }
     return;
   }
 
   // 4. Re-entry on dip for better average (capital safe - very small)
   if (STRATEGY.reEntryOnDip && (pos.reEntries || 0) < (STRATEGY.maxReEntriesPerPosition || 2)) {
-    const dipFromEntry = (entryPrice - currentPrice) / entryPrice * 100;
-    if (dipFromEntry >= (STRATEGY.reEntryDipPct || 30) * 100) {
+    // FIX: was (entryPrice - currentPrice) mixing Number and BigInt -> TypeError.
+    // pnlPct is already the correct float drawdown.
+    const dipFromEntry = -pnlPct;
+    if (dipFromEntry >= (STRATEGY.reEntryDipPct || 0.30) * 100) {
       const reAmount = ethers.parseEther(STRATEGY.reEntryAmountEth || '0.00005');
       if (reAmount > 0n) {
         logger.info(`[RE-ENTRY] ${pos.symbol} dipped ${dipFromEntry.toFixed(1)}% - Adding tiny ${STRATEGY.reEntryAmountEth} ETH`);
@@ -3437,20 +3707,38 @@ async function manageSafeStrategy(pos, currentPrice, pnlPct) {
             logger.info(`[PAPER RE-ENTRY SUCCESS] ${pos.symbol}`);
             await sendTg(`🧪 <b>[PAPER TRADE]</b> Re-buy successful on ${pos.symbol}`);
           } else {
-            const curve = new ethers.Contract(FACTORY, curveABI, wallet);
-            const gasEst = await curve.buy.estimateGas(pos.token, { value: reAmount });
-            await curve.buy(pos.token, {
-              value: reAmount,
-              gasLimit: gasEst * 130n / 100n
+            // FIX #9: await the receipt and use the REAL fill amount. The old code
+            // never awaited the tx (a revert still credited tokens) and fell back to
+            // adding a wei-denominated ETH value into a token balance.
+            const amountReceived = await withTxLock(async () => {
+              const curve = new ethers.Contract(FACTORY, curveABI, wallet);
+              const gasEst = await curve.buy.estimateGas(pos.token, { value: reAmount })
+                .catch(() => 300000n);
+              const tx = await curve.buy(pos.token, {
+                value: reAmount,
+                gasLimit: gasEst * 130n / 100n
+              });
+              const receipt = await waitForReceipt(tx, 120000, 're-entry buy');
+              if (receipt.status === 0) throw new Error('re-entry buy reverted');
+              const rec = await getReceivedAmountFromReceipt(receipt, wallet.address);
+              return rec.amount;
             });
-            pos.reEntries = (pos.reEntries || 0) + 1;
-            // Note: fixing standard reEntry bug where reAmount (ETH) was added to pos.amount (tokens)
-            const tokenEst = await estimateBuyOutput(pos.token, reAmount).catch(() => 0n);
-            const amountReceived = tokenEst > 0n ? tokenEst : reAmount; // fallback
+
+            if (amountReceived <= 0n) {
+              logger.warn(`[RE-ENTRY] ${pos.symbol} buy mined but no tokens received - skipping`);
+              return;
+            }
+
+            // FIX #9: re-average the entry price, otherwise all later PnL/TP/SL is wrong.
+            const prevCost = pos.entryPrice * pos.amount;
+            const newCost = prevCost + (reAmount * (10n ** 18n));
             pos.amount += amountReceived;
+            pos.entryPrice = pos.amount > 0n ? newCost / pos.amount : pos.entryPrice;
+            if (pos.entryPrice > pos.highestPrice) pos.highestPrice = pos.entryPrice;
+            pos.reEntries = (pos.reEntries || 0) + 1;
             dailyStats.trades++;
             savePositions();
-            logger.info(`[RE-ENTRY SUCCESS] ${pos.symbol}`);
+            logger.info(`[RE-ENTRY SUCCESS] ${pos.symbol} +${ethers.formatEther(amountReceived)} tokens, new avg entry ${ethers.formatEther(pos.entryPrice)}`);
           }
         } catch (e) {
           logger.warn(`Re-entry failed for ${pos.symbol}: ${e.message}`);
@@ -3760,7 +4048,27 @@ async function main() {
   }
 
   updateTradingMode(config.paperTrading === true);
-  loadPositions();
+
+  // FIX #6: refuse to start on unreadable state rather than silently trading
+  // with an empty portfolio while real bags sit on-chain.
+  try {
+    loadPositions();
+    logger.info(`Loaded ${positions.length} open position(s)`);
+  } catch (e) {
+    logger.error(e.message);
+    process.exit(1);
+  }
+
+  // FIX #4: baseline for the daily-loss-percentage limit.
+  try {
+    const startBal = await withTimeout(getBalance(), 8000, 'start balance');
+    globalThis.sessionStartBalanceEth = parseFloat(ethers.formatEther(startBal));
+    logger.info(`Session start balance: ${globalThis.sessionStartBalanceEth.toFixed(6)} ETH`);
+    logger.info(`Risk: max ${MAX_POS} positions | ${MAX_TRADES_PER_HOUR} trades/h | ${MAX_DAILY_LOSS_PCT}% daily loss cap | ${SLIPPAGE_PCT}% slippage`);
+  } catch (e) {
+    logger.warn('Could not read start balance - daily loss limit disabled until next restart');
+  }
+
   await initTelegram();
 
   // Initialize and start WS Mempool Monitor

@@ -7,9 +7,18 @@
     "start": "node robinhood_bot.js",
     "discover": "node discover.js",
     "setup": "node setup.js",
-    "test": "echo \"No unit tests - live mainnet with tiny 0.0001 ETH entries only. Monitor via TG and explorer.\""
+    "test": "node test/strategy.test.js"
   },
-  "keywords": ["robinhood", "chain", "4663", "noxa", "sniper", "evm", "pump", "bonding-curve"],
+  "keywords": [
+    "robinhood",
+    "chain",
+    "4663",
+    "noxa",
+    "sniper",
+    "evm",
+    "pump",
+    "bonding-curve"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
