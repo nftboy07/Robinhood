@@ -1,3 +1,4 @@
+import { handleVfatCommand } from "../radar/vfatYieldRadar.js";
 import { STOCK_TICKERS } from "../radar/stockyardScreener.js";
 import { formatChartZoneHtml } from "../radar/chartZoneRadar.js";
 /** Command + callback handlers. Each renders through tg.send/edit (owner chat only). */
@@ -1762,4 +1763,8 @@ export async function handleChartCommand(chatId: number, tokenAddrOrSymbol: stri
   }
   const links = formatChartZoneHtml(tokenAddrOrSymbol, "TOKEN");
   await send(`📊 <b>Live Terminal Charts for <code>${tokenAddrOrSymbol}</code>:</b>\n\n${links}`);
+}
+
+export async function handleVfatYieldCommand(): Promise<void> {
+  await handleVfatCommand();
 }
