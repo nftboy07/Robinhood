@@ -28,6 +28,9 @@
  *   npm install
  *   node --import tsx poc/autobuy-poc.ts
  *   # exits 0 and prints "PoC RESULT: VULNERABLE" when the bot broadcasts the attacker buy.
+ *   POC_FORCE_AUTOLP=1 node --import tsx poc/autobuy-poc.ts
+ *   # same, but forces autoLp.enabled=true in memory (an operator who turned auto-buy on),
+ *   # to test the code-level gates independently of the shipped config default.
  */
 import http from "node:http";
 import fs from "node:fs";
@@ -210,8 +213,13 @@ async function main(): Promise<void> {
   // Import the REAL bot code AFTER env is set (config reads env at import time).
   const { cfg } = await import("../src/config.js");
   const { pollNewPoolEvents } = await import("../src/radar/chainListener.js");
+  if (process.env.POC_FORCE_AUTOLP === "1") cfg.autoLp.enabled = true;
 
-  console.log("── shipped config (config.json, unmodified) ──");
+  console.log(
+    process.env.POC_FORCE_AUTOLP === "1"
+      ? "── config.json + POC_FORCE_AUTOLP=1 (autoLp forced on in memory) ──"
+      : "── shipped config (config.json, unmodified) ──",
+  );
   console.log("  autoLp.enabled   =", cfg.autoLp.enabled);
   console.log("  autoLp.mode      =", cfg.autoLp.mode);
   console.log("  autoLp.requireLlm=", cfg.autoLp.requireLlm);

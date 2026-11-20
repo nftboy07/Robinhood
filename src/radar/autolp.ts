@@ -149,19 +149,13 @@ export async function maybeAutoLp(
     if (verdict.llm.score < a.minScore) return skip(`score ${verdict.llm.score} < ${a.minScore}`);
   }
 
-  // Defer GoPlus on fast sniper sources — fire first, audit async (blacklist later)
-  if (!isFastSource) {
-    const security = await auditTokenSecurity(candidate.token);
-    if (security.isHoneypot || security.securityScore < 50) {
-      addToBlacklist(candidate.token, candidate.symbol, security.warnings.join("; ") || "Failed GoPlus");
-      return skip(`security scan failed (Score: ${security.securityScore}/100)`);
-    }
-  } else {
-    void auditTokenSecurity(candidate.token).then((security) => {
-      if (security.isHoneypot || security.securityScore < 50) {
-        addToBlacklist(candidate.token, candidate.symbol, security.warnings.join("; ") || "Failed GoPlus");
-      }
-    }).catch(() => {});
+  // SECURITY: the audit must complete and pass BEFORE any buy, on every source (incl. the
+  // fast "feed-new" path, whose candidates are attacker-controllable). Inconclusive = skip.
+  const security = await auditTokenSecurity(candidate.token);
+  if (!security.audited) return skip("security audit inconclusive (no GoPlus data)");
+  if (security.isHoneypot || security.securityScore < 50) {
+    addToBlacklist(candidate.token, candidate.symbol, security.warnings.join("; ") || "Failed GoPlus");
+    return skip(`security scan failed (Score: ${security.securityScore}/100)`);
   }
 
   if (a.requireGmgn && !g) return skip("GMGN required but not available");

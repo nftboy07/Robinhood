@@ -3,32 +3,22 @@
  *
  * SECURITY: valid commands come only from the OWNER chat. The wallet key sits behind
  * this bot; without an owner check anyone who finds the bot could /closeall or mint with
- * your funds. Owner is RH_TG_CHAT if set, otherwise the FIRST chat to /start (then
- * locked and persisted). Every inbound update is checked with isOwner() before routing.
+ * your funds. Owner is configured out-of-band only (RH_TG_CHAT or config telegramChatId).
+ * There is no in-band enrollment: with no owner configured, every chat is rejected.
+ * Every inbound update is checked with isOwner() before routing.
  */
-import { env, cfg, persist } from "../config.js";
+import { env, cfg } from "../config.js";
 import { MENU_KEYBOARD } from "./menu.js";
 import { logger } from "../util/log.js";
 
 const log = logger("tg");
 const BASE = `https://api.telegram.org/bot${env.tgToken}`;
 
-let owner = env.ownerChat; // may be "" until first /start locks it
+const owner = env.ownerChat; // "" = no owner configured → bot refuses every chat
 
 export function isOwner(chatId: string | number): boolean {
-  if (!owner) return true; // not locked yet — first message will lock it
+  if (!owner) return false;
   return String(chatId) === String(owner);
-}
-
-/** Lock the bot to this chat (first /start when no RH_TG_CHAT was configured). */
-export function lockOwner(chatId: string | number): void {
-  const id = String(chatId);
-  if (!owner) {
-    owner = id;
-    cfg.telegramChatId = id;
-    persist();
-    log.info(`owner terkunci ke chat ${id} (set RH_TG_CHAT untuk permanen)`);
-  }
 }
 
 export function ownerChat(): string {

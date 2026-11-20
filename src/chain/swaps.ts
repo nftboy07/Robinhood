@@ -323,6 +323,9 @@ export async function swapWethToToken(
 
 /**
  * Fire N consecutive WETH→token swaps with consecutive nonces (no inter-tranche wait).
+ * Each tranche carries a slippage-bounded amountOutMinimum: tranches execute in order on the
+ * same pool, so tranche i's expected output is quote(prefix_i) - quote(prefix_{i-1}).
+ * Throws (sends nothing) if any quote is unavailable — never swaps with a zero floor.
  * Returns first tx hash immediately after all are broadcast.
  */
 export async function swapWethToTokenMultiFire(
@@ -334,6 +337,20 @@ export async function swapWethToTokenMultiFire(
   rememberPoolFee(tokenAddr, useFee);
   const positive = amounts.filter((a) => a > 0n);
   if (!positive.length) return { tx: "", hashes: [] };
+
+  const minOuts: bigint[] = [];
+  let cumIn = 0n;
+  let prevOut = 0n;
+  for (const amt of positive) {
+    cumIn += amt;
+    const { amountOut } = await quoteWethToToken(tokenAddr, cumIn, useFee);
+    const minOut = minOutWithSlippage(amountOut - prevOut);
+    if (amountOut <= prevOut || minOut <= 0n) {
+      throw new Error(`no quote for ${tokenAddr} fee=${useFee}; refusing zero-slippage buy`);
+    }
+    minOuts.push(minOut);
+    prevOut = amountOut;
+  }
 
   let needApprove = !isWethRouterApprovedFast();
   if (needApprove) {
@@ -359,13 +376,13 @@ export async function swapWethToTokenMultiFire(
       markWethRouterApprovedFast();
       n += 1;
     }
-    for (const amt of positive) {
+    for (const [i, amt] of positive.entries()) {
       const resp = await sendExactInput({
         tokenIn: C.weth,
         tokenOut: tokenAddr,
         fee: useFee,
         amountIn: amt,
-        amountOutMinimum: 0n,
+        amountOutMinimum: minOuts[i]!,
         nonce: n,
       });
       out.push(resp.hash);
