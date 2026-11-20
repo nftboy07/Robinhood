@@ -196,8 +196,8 @@ export function assertSecrets(): void {
   }
   if (!env.ownerChat) {
     log.warn(
-      "RH_TG_CHAT belum diset — bot akan mengunci ke chat PERTAMA yang kirim /start, " +
-        "lalu menolak yang lain. Set RH_TG_CHAT di .env untuk mengunci permanen.",
+      "RH_TG_CHAT belum diset — bot MENOLAK semua chat Telegram. " +
+        "Set RH_TG_CHAT di .env ke chat id lu (dari @userinfobot).",
     );
   }
 }

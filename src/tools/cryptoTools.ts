@@ -25,6 +25,8 @@ export interface ContractSecurityReport {
   creatorAddress: string;
   securityScore: number; // 0..100 (100 = completely safe)
   warnings: string[];
+  /** true only when GoPlus returned real data for this token; false = inconclusive (fail closed) */
+  audited: boolean;
 }
 
 export interface DefiLlamaPrice {
@@ -71,6 +73,7 @@ export async function auditTokenSecurity(tokenAddr: string): Promise<ContractSec
     creatorAddress: "",
     securityScore: 100,
     warnings: [],
+    audited: false,
   };
 
   try {
@@ -85,6 +88,7 @@ export async function auditTokenSecurity(tokenAddr: string): Promise<ContractSec
       const json: any = await res.json();
       const data = json?.result?.[tokenAddr.toLowerCase()];
       if (data) {
+        report.audited = true;
         report.isHoneypot = data.is_honeypot === "1";
         report.buyTaxPct = Number(data.buy_tax || 0) * 100;
         report.sellTaxPct = Number(data.sell_tax || 0) * 100;

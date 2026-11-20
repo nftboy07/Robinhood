@@ -62,7 +62,7 @@
     "attachToWatch": false
   },
   "autoLp": {
-    "enabled": true,
+    "enabled": false,
     "sizeEth": 0.002,
     "mode": "buy",
     "minScore": 30,

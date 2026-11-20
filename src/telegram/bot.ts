@@ -1,5 +1,5 @@
 /** Long-poll loop + routing. The auth guard lives here: non-owner updates are dropped. */
-import { call, send, isOwner, lockOwner } from "./tg.js";
+import { call, send, isOwner } from "./tg.js";
 import { resolveMenu } from "./menu.js";
 import { startWatch } from "./watchLoop.js";
 import { startPokeSubagentWatcher } from "../radar/poke.js";
@@ -77,8 +77,6 @@ async function routeMessage(m: any): Promise<void> {
   }
   const t: string = resolveMenu(String(m.text ?? "").trim()); // map bottom-menu labels → commands
 
-  // /start (and /help) is the only thing that can LOCK an unclaimed bot to a chat
-  if (t === "/start" || t === "/help") lockOwner(chatId);
   if (!isOwner(chatId)) {
     log.warn(`update ditolak dari chat non-owner ${chatId}`);
     return;
